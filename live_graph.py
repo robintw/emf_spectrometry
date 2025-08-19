@@ -18,6 +18,8 @@ except ImportError:
 # Global constants
 LINE_THICKNESS = 5
 AXIS_FONT_SIZE = 20
+X_AXIS_MIN = 300
+X_AXIS_MAX = 900
 
 def get_live_data():
     """Generate sine wave data with x values from 300 to 900 and random phase offset."""
@@ -39,6 +41,9 @@ class LiveGraphApp(QMainWindow):
         self.background_regions = []
         self.convolution_curve = None
         self.convolution_mode = False
+        self.held_convolution_curves = []
+        self.held_convolution_mode = False
+        self.held_lines_data = []  # Store data for each held line
         self.init_ui()
         self.setup_timer()
         
@@ -73,6 +78,11 @@ class LiveGraphApp(QMainWindow):
         self.plot_widget.getAxis('bottom').setStyle(tickFont=axis_font)
         
         self.plot_widget.getPlotItem().getViewBox().setBackgroundColor('white')
+        
+        # Set fixed x-axis range
+        self.plot_widget.setXRange(X_AXIS_MIN, X_AXIS_MAX, padding=0)
+        self.plot_widget.getViewBox().setLimits(xMin=X_AXIS_MIN, xMax=X_AXIS_MAX)
+        self.plot_widget.getViewBox().setMouseEnabled(x=False, y=True)
         
         legend = self.plot_widget.addLegend()
         legend.setLabelTextSize('20pt')
@@ -112,6 +122,8 @@ class LiveGraphApp(QMainWindow):
                 name=str(self.held_line_counter)
             )
             self.held_curves.append(held_curve)
+            # Store the data for potential convolution later
+            self.held_lines_data.append((self.current_x.copy(), self.current_y.copy(), color))
     
     def show_help(self):
         help_text = """Keyboard Shortcuts:
@@ -120,7 +132,7 @@ h / Spacebar - Hold current data as numbered line (1, 2, 3, etc.)
 l - Toggle live line visibility on/off
 c - Clear all held lines and reset numbering
 b - Toggle background shaded regions on/off
-` / ~ - Toggle Landsat 8 OLI convolution mode on/off
+` / ~ - Toggle Landsat 8 OLI convolution (live mode) or toggle held lines convolution view
 ? - Show this help dialog
 Escape - Exit application
 
@@ -165,14 +177,25 @@ Colors cycle: Blue → Green → Orange → Purple"""
     def clear_held_lines(self):
         for curve in self.held_curves:
             self.plot_widget.removeItem(curve)
+        for curve in self.held_convolution_curves:
+            self.plot_widget.removeItem(curve)
         self.held_curves.clear()
+        self.held_convolution_curves.clear()
+        self.held_lines_data.clear()
         self.held_line_counter = 0
+        self.held_convolution_mode = False
 
     def toggle_convolution_mode(self):
         if not PYSPECTRA_AVAILABLE:
             print("PySpectra not available - cannot perform convolution")
             return
+        
+        # If live line is not visible, handle held lines convolution
+        if not self.live_line_visible:
+            self.toggle_held_convolution_mode()
+            return
             
+        # Handle live line convolution
         self.convolution_mode = not self.convolution_mode
         
         if not self.convolution_mode:
@@ -213,6 +236,60 @@ Colors cycle: Blue → Green → Orange → Purple"""
             symbolSize=8,
             name='Landsat 8'
         )
+
+    def convolve_held_lines(self):
+        if not PYSPECTRA_AVAILABLE or not self.held_lines_data:
+            return
+            
+        # Clear existing held convolution curves
+        for curve in self.held_convolution_curves:
+            self.plot_widget.removeItem(curve)
+        self.held_convolution_curves.clear()
+        
+        # Convolve each held line
+        for i, (x_data, y_data, color) in enumerate(self.held_lines_data):
+            try:
+                # Create Spectra object with held line data
+                s = Spectra(wavelengths=x_data / 1000, values=y_data)
+                
+                # Perform convolution with Landsat 8 OLI bands
+                convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
+                
+                # Plot convolved data with same color as original held line
+                conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
+                conv_y = convolved
+                
+                conv_curve = self.plot_widget.plot(
+                    conv_x, conv_y,
+                    pen=pg.mkPen(color=color, width=LINE_THICKNESS),
+                    symbol='s',
+                    symbolBrush=color,
+                    symbolSize=8,
+                    name=f'{i+1} (L8)'
+                )
+                self.held_convolution_curves.append(conv_curve)
+                
+            except Exception as e:
+                print(f"Convolution error for held line {i+1}: {e}")
+
+    def toggle_held_convolution_mode(self):
+        if not self.held_lines_data:
+            return
+            
+        self.held_convolution_mode = not self.held_convolution_mode
+        
+        if self.held_convolution_mode:
+            # Hide original held lines, show convolved versions
+            for curve in self.held_curves:
+                curve.hide()
+            self.convolve_held_lines()
+        else:
+            # Show original held lines, hide convolved versions
+            for curve in self.held_curves:
+                curve.show()
+            for curve in self.held_convolution_curves:
+                self.plot_widget.removeItem(curve)
+            self.held_convolution_curves.clear()
 
     def toggle_live_line(self):
         self.live_line_visible = not self.live_line_visible
