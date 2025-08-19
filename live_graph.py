@@ -7,10 +7,17 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QMe
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
+try:
+    from PySpectra.spectra_reader import Spectra
+    from PySpectra.srf import LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5
+    PYSPECTRA_AVAILABLE = True
+except ImportError:
+    PYSPECTRA_AVAILABLE = False
+    print("Warning: PySpectra not available. Install from https://github.com/pmlrsg/PySpectra/")
 
 # Global constants
 LINE_THICKNESS = 5
-AXIS_FONT_SIZE = 16
+AXIS_FONT_SIZE = 20
 
 def get_live_data():
     """Generate sine wave data with x values from 300 to 900 and random phase offset."""
@@ -30,6 +37,8 @@ class LiveGraphApp(QMainWindow):
         self.held_line_counter = 0
         self.background_regions_visible = False
         self.background_regions = []
+        self.convolution_curve = None
+        self.convolution_mode = False
         self.init_ui()
         self.setup_timer()
         
@@ -86,6 +95,10 @@ class LiveGraphApp(QMainWindow):
         self.current_y = y
         self.plot_curve.setData(x, y)
         
+        # Update convolution if mode is active
+        if self.convolution_mode:
+            self.update_convolution()
+        
     def hold_current_data(self):
         if self.current_x is not None and self.current_y is not None:
             self.held_line_counter += 1
@@ -103,10 +116,11 @@ class LiveGraphApp(QMainWindow):
     def show_help(self):
         help_text = """Keyboard Shortcuts:
 
-h - Hold current data as numbered line (1, 2, 3, etc.)
+h / Spacebar - Hold current data as numbered line (1, 2, 3, etc.)
 l - Toggle live line visibility on/off
 c - Clear all held lines and reset numbering
 b - Toggle background shaded regions on/off
+` / ~ - Toggle Landsat 8 OLI convolution mode on/off
 ? - Show this help dialog
 Escape - Exit application
 
@@ -154,6 +168,52 @@ Colors cycle: Blue → Green → Orange → Purple"""
         self.held_curves.clear()
         self.held_line_counter = 0
 
+    def toggle_convolution_mode(self):
+        if not PYSPECTRA_AVAILABLE:
+            print("PySpectra not available - cannot perform convolution")
+            return
+            
+        self.convolution_mode = not self.convolution_mode
+        
+        if not self.convolution_mode:
+            # Turn off convolution mode - remove curve
+            if self.convolution_curve is not None:
+                self.plot_widget.removeItem(self.convolution_curve)
+                self.convolution_curve = None
+        else:
+            # Turn on convolution mode - will be updated in update_plot()
+            self.update_convolution()
+
+    def update_convolution(self):
+        if not PYSPECTRA_AVAILABLE or not self.convolution_mode:
+            return
+            
+        if self.current_x is None or self.current_y is None:
+            return
+            
+        # Create Spectra object with current data
+        s = Spectra(wavelengths=self.current_x / 1000, values=self.current_y)
+            
+        # Perform convolution with Landsat 8 OLI bands
+        convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
+
+        # Remove existing convolution curve if present
+        if self.convolution_curve is not None:
+            self.plot_widget.removeItem(self.convolution_curve)
+
+        # Plot convolved data as black squares
+        conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
+        conv_y = convolved
+        
+        self.convolution_curve = self.plot_widget.plot(
+            conv_x, conv_y,
+            pen=pg.mkPen('black', width=LINE_THICKNESS),
+            symbol='s',
+            symbolBrush='black',
+            symbolSize=8,
+            name='Landsat 8'
+        )
+
     def toggle_live_line(self):
         self.live_line_visible = not self.live_line_visible
         if self.live_line_visible:
@@ -164,7 +224,7 @@ Colors cycle: Blue → Green → Orange → Purple"""
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.close()
-        elif event.key() == Qt.Key_H:
+        elif event.key() == Qt.Key_H or event.key() == Qt.Key_Space:
             self.hold_current_data()
         elif event.key() == Qt.Key_L:
             self.toggle_live_line()
@@ -172,6 +232,8 @@ Colors cycle: Blue → Green → Orange → Purple"""
             self.clear_held_lines()
         elif event.key() == Qt.Key_B:
             self.toggle_background_regions()
+        elif event.key() == Qt.Key_AsciiTilde or event.key() == Qt.Key_QuoteLeft:
+            self.toggle_convolution_mode()
         elif event.key() == Qt.Key_Question:
             self.show_help()
 
