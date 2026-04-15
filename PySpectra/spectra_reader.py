@@ -95,12 +95,19 @@ class Spectra(object):
         if srf.value_units != "response":
             raise ValueError('SRF must be a Spectra instance with value_units set to "response"')
 
+        # Restrict SRF to the overlap with the spectrum's wavelength range,
+        # so interpolation does not fail when the SRF extends slightly beyond
+        # the spectrum (e.g. spectrometer cut-off below the SRF band edge).
+        mask = (srf.wavelengths >= self.wavelengths[0]) & (srf.wavelengths <= self.wavelengths[-1])
+        srf_wavelengths = srf.wavelengths[mask]
+        srf_values = srf.values[mask]
+
         # Interpolate to required wavelengths
         f = interp1d(self.wavelengths, self.values)
-        at_srf_wavelengths = f(srf.wavelengths)
+        at_srf_wavelengths = f(srf_wavelengths)
 
-        result = trapezoid(srf.values * at_srf_wavelengths,
-                       srf.wavelengths) / trapezoid(srf.values, srf.wavelengths)
+        result = trapezoid(srf_values * at_srf_wavelengths,
+                       srf_wavelengths) / trapezoid(srf_values, srf_wavelengths)
 
         return result
 
