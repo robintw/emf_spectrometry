@@ -27,6 +27,19 @@ X_AXIS_MAX = 900
 MAX_INTEGRATION_TIME = 150000
 MIN_INTEGRATION_TIME = 5000
 
+# Reference spectrum averaging
+NUM_REFERENCE_FRAMES = 20
+
+# Relative-mode display
+Y_RANGE_RELATIVE_MIN = 0.0
+Y_RANGE_RELATIVE_MAX = 1.2
+
+# Low-SNR masking in relative mode: blank out pixels where the reference
+# signal is below LOW_SNR_THRESHOLD * max(reference). Set MASK_LOW_SNR to
+# False to disable.
+MASK_LOW_SNR = True
+LOW_SNR_THRESHOLD = 0.01
+
 spec = Spectrometer.from_first_available()
 spec.integration_time_micros(10000)
 
@@ -58,6 +71,8 @@ class LiveGraphApp(QMainWindow):
         self.held_convolution_curves = []
         self.held_convolution_mode = False
         self.held_lines_data = []  # Store data for each held line
+        self.ndvi_display_mode = False
+        self.ndvi_label = None
         self.reference_x = None
         self.reference_y = None
         self.integration_time = 5000  # microseconds
@@ -119,6 +134,31 @@ class LiveGraphApp(QMainWindow):
         
         self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='red', width=LINE_THICKNESS), name='Live')
 
+        # NDVI overlay label, anchored to the top-left of the plot viewbox
+        self.ndvi_label = pg.TextItem('', color='black', anchor=(0, 0))
+        ndvi_font = QFont()
+        ndvi_font.setPointSize(28)
+        ndvi_font.setBold(True)
+        self.ndvi_label.setFont(ndvi_font)
+        self.ndvi_label.setParentItem(self.plot_widget.getPlotItem().getViewBox())
+        self.ndvi_label.setPos(15, 10)
+        self.ndvi_label.hide()
+
+        # Overlay shown while a reference spectrum is being captured
+        self.capture_overlay = QLabel("CAPTURING REFERENCE...", self.plot_widget)
+        capture_font = QFont()
+        capture_font.setPointSize(36)
+        capture_font.setBold(True)
+        self.capture_overlay.setFont(capture_font)
+        self.capture_overlay.setStyleSheet(
+            "background-color: rgba(255, 235, 100, 240);"
+            "color: black;"
+            "padding: 30px;"
+            "border: 3px solid black;"
+        )
+        self.capture_overlay.setAlignment(Qt.AlignCenter)
+        self.capture_overlay.hide()
+
     def create_status_bar(self):
         """Create a status bar at the bottom with integration time and relative mode indicators."""
         status_widget = QWidget()
@@ -163,11 +203,10 @@ class LiveGraphApp(QMainWindow):
 
         # If we have a reference spectrum, compute and display relative spectrum
         if self.reference_x is not None and self.reference_y is not None:
-            # Avoid division by zero
-            relative_y = np.divide(y, self.reference_y, out=np.zeros_like(y), where=self.reference_y!=0)
-            self.plot_curve.setData(x, relative_y)
+            relative_y = self.compute_relative(y)
+            self.plot_curve.setData(x, relative_y, connect='finite')
             # Set fixed y-axis range for relative mode
-            self.plot_widget.setYRange(-0.5, 2, padding=0)
+            self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, Y_RANGE_RELATIVE_MAX, padding=0)
         else:
             self.plot_curve.setData(x, y)
             # Enable auto-range for absolute mode
@@ -177,6 +216,16 @@ class LiveGraphApp(QMainWindow):
         if self.convolution_mode:
             self.update_convolution()
         
+    def compute_relative(self, y):
+        """Divide y by the stored reference spectrum, masking low-SNR samples."""
+        ref = self.reference_y
+        with np.errstate(divide='ignore', invalid='ignore'):
+            relative_y = np.where(ref != 0, y / ref, np.nan)
+        if MASK_LOW_SNR:
+            threshold = LOW_SNR_THRESHOLD * np.max(ref)
+            relative_y = np.where(ref >= threshold, relative_y, np.nan)
+        return relative_y
+
     def hold_current_data(self):
         if self.current_x is not None and self.current_y is not None:
             self.held_line_counter += 1
@@ -186,7 +235,7 @@ class LiveGraphApp(QMainWindow):
             # Determine what to display: relative or absolute spectrum
             if self.reference_x is not None and self.reference_y is not None:
                 # Hold the relative spectrum
-                display_y = np.divide(self.current_y, self.reference_y, out=np.zeros_like(self.current_y), where=self.reference_y!=0)
+                display_y = self.compute_relative(self.current_y)
             else:
                 # Hold the absolute spectrum
                 display_y = self.current_y
@@ -195,7 +244,8 @@ class LiveGraphApp(QMainWindow):
                 self.current_x,
                 display_y,
                 pen=pg.mkPen(color=color, width=LINE_THICKNESS),
-                name=str(self.held_line_counter)
+                name=str(self.held_line_counter),
+                connect='finite'
             )
             self.held_curves.append(held_curve)
             # Store the data for potential convolution later (always store absolute spectrum)
@@ -210,6 +260,7 @@ c - Clear all held lines and reset numbering
 b - Toggle background shaded regions on/off
 r / - - Set current spectrum as reference and display relative spectrum (current/reference)
 ` / ~ - Toggle Landsat 8 OLI convolution (live mode) or toggle held lines convolution view
+n - Toggle NDVI value display (only when Landsat convolution is on)
 Ctrl+S / Cmd+S - Save current graph as image (SavedGraph_n.png)
 Left Arrow - Decrease integration time (min 0.50s)
 Right Arrow - Increase integration time (max 3.00s)
@@ -283,10 +334,13 @@ Colors cycle: Blue → Green → Orange → Purple"""
         self.convolution_mode = not self.convolution_mode
         
         if not self.convolution_mode:
-            # Turn off convolution mode - remove curve
+            # Turn off convolution mode - remove curve and hide NDVI label
             if self.convolution_curve is not None:
                 self.plot_widget.removeItem(self.convolution_curve)
                 self.convolution_curve = None
+            if self.ndvi_display_mode:
+                self.ndvi_display_mode = False
+                self.ndvi_label.hide()
         else:
             # Turn on convolution mode - will be updated in update_plot()
             self.update_convolution()
@@ -320,6 +374,27 @@ Colors cycle: Blue → Green → Orange → Purple"""
             symbolSize=8,
             name='Landsat 8'
         )
+
+        if self.ndvi_display_mode:
+            # B4 = Red, B5 = NIR in the convolved list (indices 3 and 4)
+            red = convolved[3]
+            nir = convolved[4]
+            denom = nir + red
+            if denom != 0:
+                ndvi = (nir - red) / denom
+                self.ndvi_label.setText(f'NDVI: {ndvi:.4f}')
+            else:
+                self.ndvi_label.setText('NDVI: ----')
+
+    def toggle_ndvi_display(self):
+        if not self.convolution_mode:
+            return
+        self.ndvi_display_mode = not self.ndvi_display_mode
+        if self.ndvi_display_mode:
+            self.ndvi_label.show()
+            self.update_convolution()
+        else:
+            self.ndvi_label.hide()
 
     def convolve_held_lines(self):
         if not PYSPECTRA_AVAILABLE or not self.held_lines_data:
@@ -383,11 +458,38 @@ Colors cycle: Blue → Green → Orange → Purple"""
             self.plot_curve.hide()
 
     def set_reference_spectrum(self):
-        """Capture current spectrum as reference for relative measurements."""
-        if self.current_x is not None and self.current_y is not None:
-            self.reference_x = self.current_x.copy()
-            self.reference_y = self.current_y.copy()
+        """Capture an averaged reference spectrum for relative measurements."""
+        # Pause the live-update timer so it does not fight us for the device
+        self.timer.stop()
+        try:
+            self._show_capture_overlay()
+
+            frames = []
+            x = None
+            for _ in range(NUM_REFERENCE_FRAMES):
+                x, y = get_live_data()
+                frames.append(y)
+                # Keep the UI responsive and let the overlay paint between frames
+                QApplication.processEvents()
+
+            self.reference_x = x
+            self.reference_y = np.mean(frames, axis=0)
             self.show_relative_label()
+        finally:
+            self.capture_overlay.hide()
+            self.timer.start(500)
+
+    def _show_capture_overlay(self):
+        """Center the capture-in-progress overlay over the plot and show it."""
+        self.capture_overlay.adjustSize()
+        pw = self.plot_widget.width()
+        ph = self.plot_widget.height()
+        ow = self.capture_overlay.width()
+        oh = self.capture_overlay.height()
+        self.capture_overlay.move(max(0, (pw - ow) // 2), max(0, (ph - oh) // 2))
+        self.capture_overlay.show()
+        self.capture_overlay.raise_()
+        QApplication.processEvents()
 
     def show_relative_label(self):
         """Show 'RELATIVE' label in status bar."""
@@ -406,8 +508,13 @@ Colors cycle: Blue → Green → Orange → Purple"""
             time_in_hundredths = self.integration_time / 10000.0
             self.integration_time_label.setText(f'{time_in_hundredths:.2f}s')
 
+    def _relative_mode_active(self):
+        return self.reference_x is not None and self.reference_y is not None
+
     def increase_integration_time(self):
         """Increase integration time by 5000 microseconds, max 30000."""
+        if self._relative_mode_active():
+            return
         if self.integration_time < MAX_INTEGRATION_TIME:
             self.integration_time += 10000
             spec.integration_time_micros(self.integration_time)
@@ -415,6 +522,8 @@ Colors cycle: Blue → Green → Orange → Purple"""
 
     def decrease_integration_time(self):
         """Decrease integration time by 5000 microseconds, min 5000."""
+        if self._relative_mode_active():
+            return
         if self.integration_time > MIN_INTEGRATION_TIME:
             self.integration_time -= 10000
             spec.integration_time_micros(self.integration_time)
@@ -474,6 +583,8 @@ Colors cycle: Blue → Green → Orange → Purple"""
             self.toggle_background_regions()
         elif event.key() == Qt.Key_AsciiTilde or event.key() == Qt.Key_QuoteLeft:
             self.toggle_convolution_mode()
+        elif event.key() == Qt.Key_N:
+            self.toggle_ndvi_display()
         elif event.key() == Qt.Key_R:
             print("Pressed")
             self.set_reference_spectrum()

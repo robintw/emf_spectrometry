@@ -9,6 +9,8 @@
 - `h` - Hold current data as numbered line (Line 1, 2, etc.)
 - `l` - Toggle live line visibility on/off
 - `c` - Clear all held lines and reset numbering
+- `` ` `` / `~` - Toggle Landsat 8 OLI convolution (live or held lines)
+- `n` - Toggle NDVI value display (only when Landsat convolution is on)
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
 - `?` - Show help dialog with all keyboard shortcuts
 - `Escape` - Exit application
