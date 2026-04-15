@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "/Users/robin/.gradle/daemon/8.11.1/com.example.colorpicker.app-debug-20:/layout_activity_main.xml.flat",
+        "source": "/Users/robin/.gradle/daemon/8.11.1/com.example.colorpicker.app-main-22:/layout/activity_main.xml"
+    },
+    {
+        "merged": "com.example.colorpicker.app-debug-20:/layout_activity_main.xml.flat",
+        "source": "com.example.colorpicker.app-main-22:/layout/activity_main.xml"
+    }
+]

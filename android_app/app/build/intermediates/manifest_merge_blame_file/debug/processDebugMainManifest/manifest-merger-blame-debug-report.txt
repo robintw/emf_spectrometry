@@ -1,0 +1,75 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.example.colorpicker"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="21"
+9        android:targetSdkVersion="35" />
+10
+11    <permission
+11-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:22:5-24:47
+12        android:name="com.example.colorpicker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+12-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:23:9-81
+13        android:protectionLevel="signature" />
+13-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:24:9-44
+14
+15    <uses-permission android:name="com.example.colorpicker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+15-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:26:5-97
+15-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:26:22-94
+16
+17    <application
+17-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:4:5-16:19
+18        android:allowBackup="true"
+18-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:5:9-35
+19        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+19-->[androidx.core:core:1.12.0] /Users/robin/.gradle/caches/8.11.1/transforms/b27d5306ca66e0f136038f83024441ec/transformed/core-1.12.0/AndroidManifest.xml:28:18-86
+20        android:debuggable="true"
+21        android:extractNativeLibs="true"
+22        android:label="Color Picker"
+22-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:6:9-37
+23        android:theme="@style/Theme.AppCompat.Light.NoActionBar" >
+23-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:7:9-65
+24        <activity
+24-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:8:9-15:20
+25            android:name="com.example.colorpicker.MainActivity"
+25-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:9:13-41
+26            android:exported="true" >
+26-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:10:13-36
+27            <intent-filter>
+27-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:11:13-14:29
+28                <action android:name="android.intent.action.MAIN" />
+28-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:12:17-69
+28-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:12:25-66
+29
+30                <category android:name="android.intent.category.LAUNCHER" />
+30-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:13:17-77
+30-->/Users/robin/code/emf_spectrometry/android_app/app/src/main/AndroidManifest.xml:13:27-74
+31            </intent-filter>
+32        </activity>
+33
+34        <provider
+34-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+35            android:name="androidx.startup.InitializationProvider"
+35-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:25:13-67
+36            android:authorities="com.example.colorpicker.androidx-startup"
+36-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:26:13-68
+37            android:exported="false" >
+37-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:27:13-37
+38            <meta-data
+38-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+39                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+39-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:30:17-75
+40                android:value="androidx.startup" />
+40-->[androidx.emoji2:emoji2:1.2.0] /Users/robin/.gradle/caches/8.11.1/transforms/935935c2d4697138f3ecb3c0fa0cc1cd/transformed/emoji2-1.2.0/AndroidManifest.xml:31:17-49
+41            <meta-data
+41-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/robin/.gradle/caches/8.11.1/transforms/5743a4b68d6746710c60d3661e3b2ac0/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+42                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+42-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/robin/.gradle/caches/8.11.1/transforms/5743a4b68d6746710c60d3661e3b2ac0/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+43                android:value="androidx.startup" />
+43-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/robin/.gradle/caches/8.11.1/transforms/5743a4b68d6746710c60d3661e3b2ac0/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+44        </provider>
+45    </application>
+46
+47</manifest>

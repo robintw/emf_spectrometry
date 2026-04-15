@@ -1,0 +1,10 @@
+R_DEF: Internal format may change without notice
+local
+id btnBlue
+id btnGreen
+id btnPurple
+id btnRed
+id btnWhite
+id btnYellow
+id colorArea
+layout activity_main
