@@ -2,9 +2,12 @@
 
 import sys
 import os
+import csv
+from datetime import datetime
 import numpy as np
 import random
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout, QLabel
+from scipy.signal import savgol_filter
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout, QLabel, QInputDialog
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
@@ -40,8 +43,42 @@ Y_RANGE_RELATIVE_MAX = 1.2
 MASK_LOW_SNR = True
 LOW_SNR_THRESHOLD = 0.01
 
-spec = Spectrometer.from_first_available()
-spec.integration_time_micros(10000)
+# Savitzky-Golay smoothing (toggled with '|')
+SMOOTHING_WINDOW = 11
+SMOOTHING_ORDER = 3
+
+# Directory for saved spectra (relative to this script)
+SAVED_SPECTRA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved_spectra')
+
+TEST_MODE = '--test' in sys.argv
+
+if TEST_MODE:
+    spec = None
+    CORRECT_DARK = False
+    CORRECT_NONLINEARITY = False
+    print("Running in test mode (sine wave data)")
+else:
+    spec = Spectrometer.from_first_available()
+    spec.integration_time_micros(10000)
+
+    # Probe which built-in corrections this device supports. Seabreeze raises if
+    # the feature is absent, so we test once at startup and reuse the flags.
+    def _probe_correction_support():
+        dark_ok = True
+        nonlin_ok = True
+        try:
+            spec.intensities(correct_dark_counts=True)
+        except Exception:
+            print("Can't use built-in dark current")
+            dark_ok = False
+        try:
+            spec.intensities(correct_nonlinearity=True)
+        except Exception:
+            nonlin_ok = False
+        return dark_ok, nonlin_ok
+
+    CORRECT_DARK, CORRECT_NONLINEARITY = _probe_correction_support()
+    print(f"Spectrometer corrections — dark: {CORRECT_DARK}, nonlinearity: {CORRECT_NONLINEARITY}")
 
 def get_live_data_sine():
     """Generate sine wave data with x values from 300 to 900 and random phase offset."""
@@ -51,9 +88,35 @@ def get_live_data_sine():
     return x, y
 
 def get_live_data():
+    if TEST_MODE:
+        return get_live_data_sine()
     wavelengths = spec.wavelengths()
-    intensities = spec.intensities()
+    intensities = spec.intensities(
+        correct_dark_counts=CORRECT_DARK,
+        correct_nonlinearity=CORRECT_NONLINEARITY,
+    )
     return wavelengths, intensities
+
+class SpectrumPickerDialog(QMessageBox):
+    """Dialog that shows a numbered list and returns the selected number."""
+    def __init__(self, text, max_items, parent=None):
+        super().__init__(parent)
+        self.max_items = max_items
+        self.setWindowTitle('Load Spectrum')
+        self.setText(text)
+        self.setStandardButtons(QMessageBox.Cancel)
+        font = QFont()
+        font.setPointSize(18)
+        self.setFont(font)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.done(0)
+        elif Qt.Key_1 <= event.key() <= Qt.Key_9:
+            number = event.key() - Qt.Key_1 + 1
+            if number <= self.max_items:
+                self.done(number)
+
 
 class LiveGraphApp(QMainWindow):
     def __init__(self):
@@ -71,16 +134,20 @@ class LiveGraphApp(QMainWindow):
         self.held_convolution_curves = []
         self.held_convolution_mode = False
         self.held_lines_data = []  # Store data for each held line
+        self.smoothing_enabled = False
+        self.peak_mode = False
         self.ndvi_display_mode = False
         self.ndvi_label = None
         self.reference_x = None
         self.reference_y = None
         self.integration_time = 5000  # microseconds
         self.relative_label = None  # Will be set in create_status_bar()
+        self.peak_label = None  # Will be set in create_status_bar()
+        self.smoothing_label = None  # Will be set in create_status_bar()
         self.integration_time_label = None  # Will be set in create_status_bar()
         self.init_ui()
         self.setup_timer()
-        
+
     def init_ui(self):
         self.setWindowTitle('Live Spectrometry Data')
         self.showFullScreen()
@@ -99,31 +166,31 @@ class LiveGraphApp(QMainWindow):
         # Create status bar at bottom
         self.status_bar = self.create_status_bar()
         layout.addWidget(self.status_bar)
-        
+
         self.plot_widget.setBackground('white')
-        
+
         label_style = {'color': 'black', 'font-size': f'{AXIS_FONT_SIZE}pt'}
         self.plot_widget.setLabel('bottom', 'Wavelength (nm)', **label_style)
         self.plot_widget.setLabel('left', 'Intensity', color='black')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        
+
         self.plot_widget.getAxis('bottom').setPen(pg.mkPen('black'))
         self.plot_widget.getAxis('left').setPen(pg.mkPen('black'))
         self.plot_widget.getAxis('bottom').setTextPen(pg.mkPen('black'))
         self.plot_widget.getAxis('left').setTextPen(pg.mkPen('black'))
-        
+
         axis_font = QFont()
         axis_font.setPointSize(AXIS_FONT_SIZE)
         self.plot_widget.getAxis('bottom').setTickFont(axis_font)
         self.plot_widget.getAxis('bottom').setStyle(tickFont=axis_font)
-        
+
         self.plot_widget.getPlotItem().getViewBox().setBackgroundColor('white')
-        
+
         # Set fixed x-axis range
         self.plot_widget.setXRange(X_AXIS_MIN, X_AXIS_MAX, padding=0)
         self.plot_widget.getViewBox().setLimits(xMin=X_AXIS_MIN, xMax=X_AXIS_MAX)
         self.plot_widget.getViewBox().setMouseEnabled(x=False, y=True)
-        
+
         legend = self.plot_widget.addLegend()
         legend.setLabelTextSize('20pt')
         font = QFont()
@@ -131,7 +198,7 @@ class LiveGraphApp(QMainWindow):
         legend.opts['labelTextSize'] = '20pt'
         legend.opts['symbolWidth'] = 40
         legend.opts['symbolHeight'] = 20
-        
+
         self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='red', width=LINE_THICKNESS), name='Live')
 
         # NDVI overlay label, anchored to the top-left of the plot viewbox
@@ -182,7 +249,19 @@ class LiveGraphApp(QMainWindow):
         # Spacer to push relative label to the right
         status_layout.addStretch()
 
-        # Relative mode label on the right
+        # Mode labels on the right
+        self.smoothing_label = QLabel("SMOOTHING")
+        self.smoothing_label.setFont(font)
+        self.smoothing_label.setStyleSheet("color: blue;")
+        self.smoothing_label.setVisible(False)
+        status_layout.addWidget(self.smoothing_label)
+
+        self.peak_label = QLabel("PEAK")
+        self.peak_label.setFont(font)
+        self.peak_label.setStyleSheet("color: red;")
+        self.peak_label.setVisible(False)
+        status_layout.addWidget(self.peak_label)
+
         self.relative_label = QLabel("RELATIVE")
         self.relative_label.setFont(font)
         self.relative_label.setStyleSheet("color: red;")
@@ -195,27 +274,54 @@ class LiveGraphApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(500)
-        
+
     def update_plot(self):
         x, y = get_live_data()
         self.current_x = x
         self.current_y = y
 
+        y_disp = self.maybe_smooth(y)
+
         # If we have a reference spectrum, compute and display relative spectrum
         if self.reference_x is not None and self.reference_y is not None:
-            relative_y = self.compute_relative(y)
+            relative_y = self.compute_relative(y_disp)
             self.plot_curve.setData(x, relative_y, connect='finite')
             # Set fixed y-axis range for relative mode
             self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, Y_RANGE_RELATIVE_MAX, padding=0)
+        elif self.peak_mode:
+            peak = np.max(y_disp)
+            if peak > 0:
+                self.plot_curve.setData(x, y_disp / peak)
+            else:
+                self.plot_curve.setData(x, y_disp)
+            self.plot_widget.setYRange(0, 1.05, padding=0)
         else:
-            self.plot_curve.setData(x, y)
+            self.plot_curve.setData(x, y_disp)
             # Enable auto-range for absolute mode
             self.plot_widget.enableAutoRange(axis='y')
 
         # Update convolution if mode is active
         if self.convolution_mode:
             self.update_convolution()
-        
+
+    def maybe_smooth(self, y):
+        """Apply Savitzky-Golay smoothing to y if smoothing is enabled."""
+        if not self.smoothing_enabled or y is None or len(y) < SMOOTHING_WINDOW:
+            return y
+        return savgol_filter(y, SMOOTHING_WINDOW, SMOOTHING_ORDER)
+
+    def toggle_smoothing(self):
+        self.smoothing_enabled = not self.smoothing_enabled
+        if self.smoothing_label is not None:
+            self.smoothing_label.setVisible(self.smoothing_enabled)
+
+    def toggle_peak_mode(self):
+        self.peak_mode = not self.peak_mode
+        if self.peak_label is not None:
+            self.peak_label.setVisible(self.peak_mode)
+        if not self.peak_mode:
+            self.plot_widget.enableAutoRange(axis='y')
+
     def compute_relative(self, y):
         """Divide y by the stored reference spectrum, masking low-SNR samples."""
         ref = self.reference_y
@@ -232,13 +338,16 @@ class LiveGraphApp(QMainWindow):
             color_index = (self.held_line_counter - 1) % len(self.held_colors)
             color = self.held_colors[color_index]
 
-            # Determine what to display: relative or absolute spectrum
+            smoothed_current = self.maybe_smooth(self.current_y)
+
+            # Determine what to display: relative, peak-normalised, or absolute spectrum
             if self.reference_x is not None and self.reference_y is not None:
-                # Hold the relative spectrum
-                display_y = self.compute_relative(self.current_y)
+                display_y = self.compute_relative(smoothed_current)
+            elif self.peak_mode:
+                peak = np.max(smoothed_current)
+                display_y = smoothed_current / peak if peak > 0 else smoothed_current
             else:
-                # Hold the absolute spectrum
-                display_y = self.current_y
+                display_y = smoothed_current
 
             held_curve = self.plot_widget.plot(
                 self.current_x,
@@ -250,7 +359,7 @@ class LiveGraphApp(QMainWindow):
             self.held_curves.append(held_curve)
             # Store the data for potential convolution later (always store absolute spectrum)
             self.held_lines_data.append((self.current_x.copy(), self.current_y.copy(), color))
-    
+
     def show_help(self):
         help_text = """Keyboard Shortcuts:
 
@@ -261,6 +370,10 @@ b - Toggle background shaded regions on/off
 r / - - Set current spectrum as reference and display relative spectrum (current/reference)
 ` / ~ - Toggle Landsat 8 OLI convolution (live mode) or toggle held lines convolution view
 n - Toggle NDVI value display (only when Landsat convolution is on)
+| / \ - Toggle Savitzky-Golay smoothing of live spectrum
+6 - Toggle peak normalisation mode (scale so peak = 1.0)
+s - Save current spectrum to CSV file (prompts for name)
+o - Open/load a saved spectrum from file
 Ctrl+S / Cmd+S - Save current graph as image (SavedGraph_n.png)
 Left Arrow - Decrease integration time (min 0.50s)
 Right Arrow - Increase integration time (max 3.00s)
@@ -268,7 +381,7 @@ Right Arrow - Increase integration time (max 3.00s)
 Escape - Exit application
 
 Colors cycle: Blue → Green → Orange → Purple"""
-        
+
         msg = QMessageBox()
         msg.setWindowTitle("Keyboard Shortcuts")
         msg.setText(help_text)
@@ -291,7 +404,7 @@ Colors cycle: Blue → Green → Orange → Purple"""
                 (570, 750, (255, 0, 0, 20)),  # Red with more transparency
                 (750, 900, (128, 0, 128, 20))  # Purple with more transparency
             ]
-            
+
             for x_start, x_end, color in regions_data:
                 region = pg.LinearRegionItem(
                     values=[x_start, x_end],
@@ -302,7 +415,7 @@ Colors cycle: Blue → Green → Orange → Purple"""
                 )
                 self.plot_widget.addItem(region)
                 self.background_regions.append(region)
-            
+
             self.background_regions_visible = True
 
     def clear_held_lines(self):
@@ -319,20 +432,24 @@ Colors cycle: Blue → Green → Orange → Purple"""
         self.reference_x = None
         self.reference_y = None
         self.hide_relative_label()
+        # Restore the live line if it was hidden
+        if not self.live_line_visible:
+            self.live_line_visible = True
+            self.plot_curve.show()
 
     def toggle_convolution_mode(self):
         if not PYSPECTRA_AVAILABLE:
             print("PySpectra not available - cannot perform convolution")
             return
-        
+
         # If live line is not visible, handle held lines convolution
         if not self.live_line_visible:
             self.toggle_held_convolution_mode()
             return
-            
+
         # Handle live line convolution
         self.convolution_mode = not self.convolution_mode
-        
+
         if not self.convolution_mode:
             # Turn off convolution mode - remove curve and hide NDVI label
             if self.convolution_curve is not None:
@@ -348,13 +465,13 @@ Colors cycle: Blue → Green → Orange → Purple"""
     def update_convolution(self):
         if not PYSPECTRA_AVAILABLE or not self.convolution_mode:
             return
-            
+
         if self.current_x is None or self.current_y is None:
             return
-            
+
         # Create Spectra object with current data
         s = Spectra(wavelengths=self.current_x / 1000, values=self.current_y)
-            
+
         # Perform convolution with Landsat 8 OLI bands
         convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
 
@@ -365,7 +482,7 @@ Colors cycle: Blue → Green → Orange → Purple"""
         # Plot convolved data as black squares
         conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
         conv_y = convolved
-        
+
         self.convolution_curve = self.plot_widget.plot(
             conv_x, conv_y,
             pen=pg.mkPen('black', width=LINE_THICKNESS),
@@ -399,25 +516,25 @@ Colors cycle: Blue → Green → Orange → Purple"""
     def convolve_held_lines(self):
         if not PYSPECTRA_AVAILABLE or not self.held_lines_data:
             return
-            
+
         # Clear existing held convolution curves
         for curve in self.held_convolution_curves:
             self.plot_widget.removeItem(curve)
         self.held_convolution_curves.clear()
-        
+
         # Convolve each held line
         for i, (x_data, y_data, color) in enumerate(self.held_lines_data):
             try:
                 # Create Spectra object with held line data
                 s = Spectra(wavelengths=x_data / 1000, values=y_data)
-                
+
                 # Perform convolution with Landsat 8 OLI bands
                 convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
-                
+
                 # Plot convolved data with same color as original held line
                 conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
                 conv_y = convolved
-                
+
                 conv_curve = self.plot_widget.plot(
                     conv_x, conv_y,
                     pen=pg.mkPen(color=color, width=LINE_THICKNESS),
@@ -427,16 +544,16 @@ Colors cycle: Blue → Green → Orange → Purple"""
                     name=f'{i+1} (L8)'
                 )
                 self.held_convolution_curves.append(conv_curve)
-                
+
             except Exception as e:
                 print(f"Convolution error for held line {i+1}: {e}")
 
     def toggle_held_convolution_mode(self):
         if not self.held_lines_data:
             return
-            
+
         self.held_convolution_mode = not self.held_convolution_mode
-        
+
         if self.held_convolution_mode:
             # Hide original held lines, show convolved versions
             for curve in self.held_curves:
@@ -517,7 +634,8 @@ Colors cycle: Blue → Green → Orange → Purple"""
             return
         if self.integration_time < MAX_INTEGRATION_TIME:
             self.integration_time += 10000
-            spec.integration_time_micros(self.integration_time)
+            if not TEST_MODE:
+                spec.integration_time_micros(self.integration_time)
             self.update_integration_time_label()
 
     def decrease_integration_time(self):
@@ -526,8 +644,107 @@ Colors cycle: Blue → Green → Orange → Purple"""
             return
         if self.integration_time > MIN_INTEGRATION_TIME:
             self.integration_time -= 10000
-            spec.integration_time_micros(self.integration_time)
+            if not TEST_MODE:
+                spec.integration_time_micros(self.integration_time)
             self.update_integration_time_label()
+
+    def save_spectrum(self):
+        """Save the currently displayed spectrum to a CSV file."""
+        if self.current_x is None or self.current_y is None:
+            return
+
+        name, ok = QInputDialog.getText(self, 'Save Spectrum', 'Spectrum name:')
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        os.makedirs(SAVED_SPECTRA_DIR, exist_ok=True)
+        filepath = os.path.join(SAVED_SPECTRA_DIR, f'{name}.csv')
+
+        y_disp = self.maybe_smooth(self.current_y)
+        mode = 'absolute'
+        if self.reference_x is not None and self.reference_y is not None:
+            y_disp = self.compute_relative(y_disp)
+            mode = 'relative'
+        elif self.peak_mode:
+            peak = np.max(y_disp)
+            if peak > 0:
+                y_disp = y_disp / peak
+            mode = 'peak'
+
+        with open(filepath, 'w', newline='') as f:
+            f.write(f'# name: {name}\n')
+            f.write(f'# timestamp: {datetime.now().isoformat()}\n')
+            f.write(f'# integration_time: {self.integration_time}\n')
+            f.write(f'# mode: {mode}\n')
+            f.write(f'# smoothing: {self.smoothing_enabled}\n')
+            writer = csv.writer(f)
+            writer.writerow(['wavelength', 'intensity'])
+            for wx, wy in zip(self.current_x, y_disp):
+                if np.isfinite(wy):
+                    writer.writerow([f'{wx:.4f}', f'{wy:.6f}'])
+
+        print(f"Spectrum saved to {filepath}")
+
+    def load_spectrum_dialog(self):
+        """Show a numbered list of saved spectra and load the selected one."""
+        if not os.path.isdir(SAVED_SPECTRA_DIR):
+            os.makedirs(SAVED_SPECTRA_DIR, exist_ok=True)
+
+        files = sorted(
+            [f for f in os.listdir(SAVED_SPECTRA_DIR) if f.endswith('.csv')],
+            key=str.lower
+        )
+        if not files:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Load Spectrum')
+            msg.setText('No saved spectra found.')
+            msg.setFont(QFont('', 14))
+            msg.exec_()
+            return
+
+        display_names = [os.path.splitext(f)[0] for f in files]
+        max_items = min(len(files), 9)
+        lines = [f'{i+1}. {display_names[i]}' for i in range(max_items)]
+        text = 'Press a number to load:\n\n' + '\n'.join(lines) + '\n\nEsc to cancel'
+
+        dialog = SpectrumPickerDialog(text, max_items, self)
+        result = dialog.exec_()
+
+        if result > 0 and result <= max_items:
+            self.load_spectrum_file(os.path.join(SAVED_SPECTRA_DIR, files[result - 1]))
+
+    def load_spectrum_file(self, filepath):
+        """Load a spectrum CSV and add it as a held line."""
+        wavelengths = []
+        intensities = []
+        with open(filepath, 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row or row[0].startswith('#'):
+                    continue
+                if row[0] == 'wavelength':
+                    continue
+                wavelengths.append(float(row[0]))
+                intensities.append(float(row[1]))
+
+        x = np.array(wavelengths)
+        y = np.array(intensities)
+
+        self.held_line_counter += 1
+        color_index = (self.held_line_counter - 1) % len(self.held_colors)
+        color = self.held_colors[color_index]
+
+        name = os.path.splitext(os.path.basename(filepath))[0]
+
+        held_curve = self.plot_widget.plot(
+            x, y,
+            pen=pg.mkPen(color=color, width=LINE_THICKNESS),
+            name=name,
+            connect='finite'
+        )
+        self.held_curves.append(held_curve)
+        self.held_lines_data.append((x, y, color))
 
     def save_graph(self):
         """Save the current graph as an image file with incremental numbering."""
@@ -585,6 +802,10 @@ Colors cycle: Blue → Green → Orange → Purple"""
             self.toggle_convolution_mode()
         elif event.key() == Qt.Key_N:
             self.toggle_ndvi_display()
+        elif event.key() == Qt.Key_Bar or event.key() == Qt.Key_Backslash:
+            self.toggle_smoothing()
+        elif event.key() == Qt.Key_6:
+            self.toggle_peak_mode()
         elif event.key() == Qt.Key_R:
             print("Pressed")
             self.set_reference_spectrum()
@@ -594,6 +815,10 @@ Colors cycle: Blue → Green → Orange → Purple"""
             self.increase_integration_time()
         elif event.key() == Qt.Key_S and event.modifiers() & Qt.ControlModifier:
             self.save_graph()
+        elif event.key() == Qt.Key_S:
+            self.save_spectrum()
+        elif event.key() == Qt.Key_O:
+            self.load_spectrum_dialog()
         elif event.key() == Qt.Key_Question:
             self.show_help()
 

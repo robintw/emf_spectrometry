@@ -11,6 +11,10 @@
 - `c` - Clear all held lines and reset numbering
 - `` ` `` / `~` - Toggle Landsat 8 OLI convolution (live or held lines)
 - `n` - Toggle NDVI value display (only when Landsat convolution is on)
+- `|` / `\` - Toggle Savitzky-Golay smoothing of the displayed spectrum
+- `6` - Toggle peak normalisation mode (scale so peak = 1.0)
+- `s` - Save current spectrum to CSV file (prompts for name)
+- `o` - Open/load a saved spectrum from file
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
 - `?` - Show help dialog with all keyboard shortcuts
 - `Escape` - Exit application
