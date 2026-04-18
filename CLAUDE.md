@@ -16,6 +16,7 @@
 - `s` - Save current spectrum to CSV file (prompts for name)
 - `o` - Open/load a saved spectrum from file
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
+- `p` - Toggle PDF presentation mode (file picker on first use; Space/Right = next, Left = prev)
 - `?` - Show help dialog with all keyboard shortcuts
 - `Escape` - Exit application
 

@@ -7,9 +7,17 @@ from datetime import datetime
 import numpy as np
 import random
 from scipy.signal import savgol_filter
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout, QLabel, QInputDialog
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QMessageBox,
+    QHBoxLayout, QLabel, QInputDialog, QStackedWidget, QFileDialog, QDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QPixmap, QImage
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    print("Warning: PyMuPDF not available. PDF viewer disabled.")
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
 try:
@@ -97,17 +105,48 @@ def get_live_data():
     )
     return wavelengths, intensities
 
-class SpectrumPickerDialog(QMessageBox):
-    """Dialog that shows a numbered list and returns the selected number."""
-    def __init__(self, text, max_items, parent=None):
+class TableDialog(QDialog):
+    """Dialog that displays a two-column table. Press a number key (1-9) to
+    select a row, or Escape to cancel. Returns the selected row number (1-based)
+    via exec_(), or 0 if cancelled."""
+    def __init__(self, title, rows, parent=None):
         super().__init__(parent)
-        self.max_items = max_items
-        self.setWindowTitle('Load Spectrum')
-        self.setText(text)
-        self.setStandardButtons(QMessageBox.Cancel)
+        self.max_items = len(rows)
+        self.setWindowTitle(title)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 15, 15, 15)
+        self.setLayout(layout)
+
         font = QFont()
-        font.setPointSize(18)
-        self.setFont(font)
+        font.setPointSize(16)
+
+        table = QTableWidget(len(rows), 2)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setFocusPolicy(Qt.NoFocus)
+        table.horizontalHeader().hide()
+        table.verticalHeader().hide()
+        table.setFont(font)
+
+        row_height = 36
+        table.verticalHeader().setDefaultSectionSize(row_height)
+
+        for i, (col1, col2) in enumerate(rows):
+            item1 = QTableWidgetItem(str(col1))
+            item2 = QTableWidgetItem(str(col2))
+            table.setItem(i, 0, item1)
+            table.setItem(i, 1, item2)
+
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
+        # Size the dialog to fit all rows without scrolling
+        total_height = len(rows) * row_height + 2 * table.frameWidth() + 30
+        table.setMinimumHeight(total_height)
+        table.setMinimumWidth(550)
+
+        layout.addWidget(table)
+        self.adjustSize()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -145,6 +184,9 @@ class LiveGraphApp(QMainWindow):
         self.peak_label = None  # Will be set in create_status_bar()
         self.smoothing_label = None  # Will be set in create_status_bar()
         self.integration_time_label = None  # Will be set in create_status_bar()
+        self.pdf_doc = None
+        self.pdf_page_index = 0
+        self.pdf_mode = False
         self.init_ui()
         self.setup_timer()
 
@@ -152,13 +194,16 @@ class LiveGraphApp(QMainWindow):
         self.setWindowTitle('Live Spectrometry Data')
         self.showFullScreen()
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Stacked widget to switch between graph and PDF views
+        self.stacked = QStackedWidget()
+        self.setCentralWidget(self.stacked)
 
+        # -- Graph page (index 0) --
+        graph_page = QWidget()
         layout = QVBoxLayout()
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
-        central_widget.setLayout(layout)
+        graph_page.setLayout(layout)
 
         self.plot_widget = pg.PlotWidget()
         layout.addWidget(self.plot_widget)
@@ -166,6 +211,14 @@ class LiveGraphApp(QMainWindow):
         # Create status bar at bottom
         self.status_bar = self.create_status_bar()
         layout.addWidget(self.status_bar)
+
+        self.stacked.addWidget(graph_page)  # index 0
+
+        # -- PDF page (index 1) --
+        self.pdf_label = QLabel()
+        self.pdf_label.setAlignment(Qt.AlignCenter)
+        self.pdf_label.setStyleSheet("background-color: black;")
+        self.stacked.addWidget(self.pdf_label)  # index 1
 
         self.plot_widget.setBackground('white')
 
@@ -361,35 +414,26 @@ class LiveGraphApp(QMainWindow):
             self.held_lines_data.append((self.current_x.copy(), self.current_y.copy(), color))
 
     def show_help(self):
-        help_text = """Keyboard Shortcuts:
-
-h / Spacebar - Hold current data as numbered line (1, 2, 3, etc.)
-l - Toggle live line visibility on/off
-c - Clear all held lines and reset numbering
-b - Toggle background shaded regions on/off
-r / - - Set current spectrum as reference and display relative spectrum (current/reference)
-` / ~ - Toggle Landsat 8 OLI convolution (live mode) or toggle held lines convolution view
-n - Toggle NDVI value display (only when Landsat convolution is on)
-| / \ - Toggle Savitzky-Golay smoothing of live spectrum
-6 - Toggle peak normalisation mode (scale so peak = 1.0)
-s - Save current spectrum to CSV file (prompts for name)
-o - Open/load a saved spectrum from file
-Ctrl+S / Cmd+S - Save current graph as image (SavedGraph_n.png)
-Left Arrow - Decrease integration time (min 0.50s)
-Right Arrow - Increase integration time (max 3.00s)
-? - Show this help dialog
-Escape - Exit application
-
-Colors cycle: Blue → Green → Orange → Purple"""
-
-        msg = QMessageBox()
-        msg.setWindowTitle("Keyboard Shortcuts")
-        msg.setText(help_text)
-        msg.setStandardButtons(QMessageBox.Ok)
-        font = QFont()
-        font.setPointSize(14)
-        msg.setFont(font)
-        msg.exec_()
+        shortcuts = [
+            ('h / Space', 'Hold current data as numbered line'),
+            ('l', 'Toggle live line visibility'),
+            ('c', 'Clear all held lines and reset numbering'),
+            ('b', 'Toggle background shaded regions'),
+            ('r', 'Set reference spectrum (relative mode)'),
+            ('` / ~', 'Toggle Landsat 8 OLI convolution'),
+            ('n', 'Toggle NDVI display (convolution mode only)'),
+            ('| / \\', 'Toggle Savitzky-Golay smoothing'),
+            ('6', 'Toggle peak normalisation (peak = 1.0)'),
+            ('s', 'Save spectrum to CSV file'),
+            ('o', 'Open/load a saved spectrum'),
+            ('Ctrl+S', 'Save graph as image'),
+            ('\u2190 / \u2192', 'Decrease / increase integration time'),
+            ('p', 'Toggle PDF presentation mode'),
+            ('?', 'Show this help dialog'),
+            ('Esc', 'Exit application'),
+        ]
+        dialog = TableDialog('Keyboard Shortcuts', shortcuts, self)
+        dialog.exec_()
 
     def toggle_background_regions(self):
         if self.background_regions_visible:
@@ -705,10 +749,9 @@ Colors cycle: Blue → Green → Orange → Purple"""
 
         display_names = [os.path.splitext(f)[0] for f in files]
         max_items = min(len(files), 9)
-        lines = [f'{i+1}. {display_names[i]}' for i in range(max_items)]
-        text = 'Press a number to load:\n\n' + '\n'.join(lines) + '\n\nEsc to cancel'
+        rows = [(str(i + 1), display_names[i]) for i in range(max_items)]
 
-        dialog = SpectrumPickerDialog(text, max_items, self)
+        dialog = TableDialog('Load Spectrum', rows, self)
         result = dialog.exec_()
 
         if result > 0 and result <= max_items:
@@ -745,6 +788,59 @@ Colors cycle: Blue → Green → Orange → Purple"""
         )
         self.held_curves.append(held_curve)
         self.held_lines_data.append((x, y, color))
+
+    def toggle_pdf_mode(self):
+        if not PYMUPDF_AVAILABLE:
+            print("PyMuPDF not available - cannot display PDFs")
+            return
+
+        if self.pdf_mode:
+            self.pdf_mode = False
+            self.stacked.setCurrentIndex(0)
+            return
+
+        if self.pdf_doc is None:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, 'Open PDF', '', 'PDF Files (*.pdf)'
+            )
+            if not filepath:
+                return
+            self.pdf_doc = fitz.open(filepath)
+            self.pdf_page_index = 0
+
+        self.pdf_mode = True
+        self.stacked.setCurrentIndex(1)
+        self.render_pdf_page()
+
+    def render_pdf_page(self):
+        if self.pdf_doc is None:
+            return
+        page = self.pdf_doc[self.pdf_page_index]
+        # Render at native resolution for HiDPI/Retina displays
+        dpr = self.devicePixelRatioF()
+        screen_rect = self.pdf_label.size()
+        zoom = (screen_rect.width() * dpr) / page.rect.width
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(img)
+        pixmap.setDevicePixelRatio(dpr)
+        self.pdf_label.setPixmap(pixmap)
+
+    def pdf_next_page(self):
+        if self.pdf_doc and self.pdf_page_index < len(self.pdf_doc) - 1:
+            self.pdf_page_index += 1
+            self.render_pdf_page()
+
+    def pdf_prev_page(self):
+        if self.pdf_doc and self.pdf_page_index > 0:
+            self.pdf_page_index -= 1
+            self.render_pdf_page()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.pdf_mode and self.pdf_doc:
+            self.render_pdf_page()
 
     def save_graph(self):
         """Save the current graph as an image file with incremental numbering."""
@@ -790,6 +886,14 @@ Colors cycle: Blue → Green → Orange → Purple"""
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.close()
+        elif event.key() == Qt.Key_P:
+            self.toggle_pdf_mode()
+        elif self.pdf_mode:
+            # PDF-mode-only keys
+            if event.key() == Qt.Key_Space or event.key() == Qt.Key_Right:
+                self.pdf_next_page()
+            elif event.key() == Qt.Key_Left:
+                self.pdf_prev_page()
         elif event.key() == Qt.Key_H or event.key() == Qt.Key_Space:
             self.hold_current_data()
         elif event.key() == Qt.Key_L:
