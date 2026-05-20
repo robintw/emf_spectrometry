@@ -7,12 +7,14 @@
 
 ### Current Keyboard Shortcuts:
 - `h` - Hold current data as numbered line (Line 1, 2, etc.)
+- `t` - Hold current data 4 times at 0.5s intervals (2-second timed capture)
 - `l` - Toggle live line visibility on/off
 - `c` - Clear all held lines and reset numbering
 - `` ` `` / `~` - Toggle Landsat 8 OLI convolution (live or held lines)
 - `n` - Toggle NDVI value display (only when Landsat convolution is on)
 - `|` / `\` - Toggle Savitzky-Golay smoothing of the displayed spectrum
 - `6` - Toggle peak normalisation mode (scale so peak = 1.0)
+- `f` - Fix the y-axis range at its current values; press again to unfix (auto-range)
 - `s` - Save current spectrum to CSV file (prompts for name)
 - `o` - Open/load a saved spectrum from file
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)

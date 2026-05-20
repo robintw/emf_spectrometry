@@ -24,6 +24,8 @@ try:
     from PySpectra.spectra_reader import Spectra
     from PySpectra.srf import LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5
     PYSPECTRA_AVAILABLE = True
+    LANDSAT_BANDS = [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]
+    LANDSAT_BAND_CENTERS_NM = [np.median(srf.wavelengths) * 1000 for srf in LANDSAT_BANDS]
 except ImportError:
     PYSPECTRA_AVAILABLE = False
     print("Warning: PySpectra not available. Install from https://github.com/pmlrsg/PySpectra/")
@@ -179,6 +181,7 @@ class LiveGraphApp(QMainWindow):
         self.ndvi_label = None
         self.reference_x = None
         self.reference_y = None
+        self.reference_convolved = None  # Cached Landsat-band convolution of the reference
         self.integration_time = 5000  # microseconds
         self.relative_label = None  # Will be set in create_status_bar()
         self.peak_label = None  # Will be set in create_status_bar()
@@ -187,6 +190,9 @@ class LiveGraphApp(QMainWindow):
         self.pdf_doc = None
         self.pdf_page_index = 0
         self.pdf_mode = False
+        self.timed_hold_timer = None
+        self.timed_hold_count = 0
+        self.y_axis_fixed = False
         self.init_ui()
         self.setup_timer()
 
@@ -339,19 +345,22 @@ class LiveGraphApp(QMainWindow):
         if self.reference_x is not None and self.reference_y is not None:
             relative_y = self.compute_relative(y_disp)
             self.plot_curve.setData(x, relative_y, connect='finite')
-            # Set fixed y-axis range for relative mode
-            self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, Y_RANGE_RELATIVE_MAX, padding=0)
+            if not self.y_axis_fixed:
+                # Set fixed y-axis range for relative mode
+                self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, Y_RANGE_RELATIVE_MAX, padding=0)
         elif self.peak_mode:
             peak = np.max(y_disp)
             if peak > 0:
                 self.plot_curve.setData(x, y_disp / peak)
             else:
                 self.plot_curve.setData(x, y_disp)
-            self.plot_widget.setYRange(0, 1.05, padding=0)
+            if not self.y_axis_fixed:
+                self.plot_widget.setYRange(0, 1.05, padding=0)
         else:
             self.plot_curve.setData(x, y_disp)
-            # Enable auto-range for absolute mode
-            self.plot_widget.enableAutoRange(axis='y')
+            if not self.y_axis_fixed:
+                # Enable auto-range for absolute mode
+                self.plot_widget.enableAutoRange(axis='y')
 
         # Update convolution if mode is active
         if self.convolution_mode:
@@ -372,8 +381,17 @@ class LiveGraphApp(QMainWindow):
         self.peak_mode = not self.peak_mode
         if self.peak_label is not None:
             self.peak_label.setVisible(self.peak_mode)
-        if not self.peak_mode:
+        if not self.peak_mode and not self.y_axis_fixed:
             self.plot_widget.enableAutoRange(axis='y')
+
+    def toggle_fixed_y_axis(self):
+        if self.y_axis_fixed:
+            self.y_axis_fixed = False
+            self.plot_widget.enableAutoRange(axis='y')
+        else:
+            y_min, y_max = self.plot_widget.getViewBox().viewRange()[1]
+            self.plot_widget.setYRange(y_min, y_max, padding=0)
+            self.y_axis_fixed = True
 
     def compute_relative(self, y):
         """Divide y by the stored reference spectrum, masking low-SNR samples."""
@@ -413,9 +431,25 @@ class LiveGraphApp(QMainWindow):
             # Store the data for potential convolution later (always store absolute spectrum)
             self.held_lines_data.append((self.current_x.copy(), self.current_y.copy(), color))
 
+    def start_timed_hold(self):
+        """Hold the current spectrum four times at 0.5s intervals."""
+        if self.timed_hold_timer is not None and self.timed_hold_timer.isActive():
+            return
+        self.timed_hold_count = 0
+        self.timed_hold_timer = QTimer(self)
+        self.timed_hold_timer.timeout.connect(self._timed_hold_tick)
+        self.timed_hold_timer.start(500)
+
+    def _timed_hold_tick(self):
+        self.hold_current_data()
+        self.timed_hold_count += 1
+        if self.timed_hold_count >= 4:
+            self.timed_hold_timer.stop()
+
     def show_help(self):
         shortcuts = [
             ('h / Space', 'Hold current data as numbered line'),
+            ('t', 'Hold 4 times over 2 seconds (every 0.5s)'),
             ('l', 'Toggle live line visibility'),
             ('c', 'Clear all held lines and reset numbering'),
             ('b', 'Toggle background shaded regions'),
@@ -424,6 +458,7 @@ class LiveGraphApp(QMainWindow):
             ('n', 'Toggle NDVI display (convolution mode only)'),
             ('| / \\', 'Toggle Savitzky-Golay smoothing'),
             ('6', 'Toggle peak normalisation (peak = 1.0)'),
+            ('f', 'Fix / unfix y-axis range at current view'),
             ('s', 'Save spectrum to CSV file'),
             ('o', 'Open/load a saved spectrum'),
             ('Ctrl+S', 'Save graph as image'),
@@ -475,11 +510,16 @@ class LiveGraphApp(QMainWindow):
         # Clear reference spectrum
         self.reference_x = None
         self.reference_y = None
+        self.reference_convolved = None
         self.hide_relative_label()
         # Restore the live line if it was hidden
         if not self.live_line_visible:
             self.live_line_visible = True
             self.plot_curve.show()
+        # Unfix the y-axis if it was fixed
+        if self.y_axis_fixed:
+            self.y_axis_fixed = False
+            self.plot_widget.enableAutoRange(axis='y')
 
     def toggle_convolution_mode(self):
         if not PYSPECTRA_AVAILABLE:
@@ -506,6 +546,35 @@ class LiveGraphApp(QMainWindow):
             # Turn on convolution mode - will be updated in update_plot()
             self.update_convolution()
 
+    def _convolve_with_landsat(self, x, y):
+        """Convolve a spectrum (wavelengths in nm) with Landsat 8 OLI bands.
+        Returns a numpy array of band-integrated values, one per band."""
+        s = Spectra(wavelengths=x / 1000, values=y)
+        return np.asarray(s.convolve(LANDSAT_BANDS), dtype=float)
+
+    def _get_reference_convolved(self):
+        """Band-convolve the reference spectrum, cached. Returns None when no
+        reference is set. Dividing the target's band values by these gives
+        per-band reflectance, which is what NDVI actually requires."""
+        if not PYSPECTRA_AVAILABLE or self.reference_y is None:
+            return None
+        if self.reference_convolved is None:
+            self.reference_convolved = self._convolve_with_landsat(
+                self.reference_x, self.reference_y
+            )
+        return self.reference_convolved
+
+    def _band_values_for_display(self, x, y):
+        """Convolve (x, y) with Landsat bands and, if a reference is set,
+        divide by the reference's band values so the result is reflectance
+        on the same 0-1 scale as the relative spectrum view."""
+        convolved = self._convolve_with_landsat(x, y)
+        ref_conv = self._get_reference_convolved()
+        if ref_conv is not None:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                convolved = np.where(ref_conv != 0, convolved / ref_conv, np.nan)
+        return convolved
+
     def update_convolution(self):
         if not PYSPECTRA_AVAILABLE or not self.convolution_mode:
             return
@@ -513,22 +582,13 @@ class LiveGraphApp(QMainWindow):
         if self.current_x is None or self.current_y is None:
             return
 
-        # Create Spectra object with current data
-        s = Spectra(wavelengths=self.current_x / 1000, values=self.current_y)
+        convolved = self._band_values_for_display(self.current_x, self.current_y)
 
-        # Perform convolution with Landsat 8 OLI bands
-        convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
-
-        # Remove existing convolution curve if present
         if self.convolution_curve is not None:
             self.plot_widget.removeItem(self.convolution_curve)
 
-        # Plot convolved data as black squares
-        conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
-        conv_y = convolved
-
         self.convolution_curve = self.plot_widget.plot(
-            conv_x, conv_y,
+            LANDSAT_BAND_CENTERS_NM, convolved,
             pen=pg.mkPen('black', width=LINE_THICKNESS),
             symbol='s',
             symbolBrush='black',
@@ -541,9 +601,10 @@ class LiveGraphApp(QMainWindow):
             red = convolved[3]
             nir = convolved[4]
             denom = nir + red
-            if denom != 0:
+            if np.isfinite(denom) and denom != 0:
                 ndvi = (nir - red) / denom
-                self.ndvi_label.setText(f'NDVI: {ndvi:.4f}')
+                suffix = '' if self._relative_mode_active() else '  (raw)'
+                self.ndvi_label.setText(f'NDVI: {ndvi:.4f}{suffix}')
             else:
                 self.ndvi_label.setText('NDVI: ----')
 
@@ -569,18 +630,10 @@ class LiveGraphApp(QMainWindow):
         # Convolve each held line
         for i, (x_data, y_data, color) in enumerate(self.held_lines_data):
             try:
-                # Create Spectra object with held line data
-                s = Spectra(wavelengths=x_data / 1000, values=y_data)
-
-                # Perform convolution with Landsat 8 OLI bands
-                convolved = s.convolve([LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5])
-
-                # Plot convolved data with same color as original held line
-                conv_x = list(map(lambda srf: np.median(srf.wavelengths) * 1000, [LANDSAT_OLI_B1, LANDSAT_OLI_B2, LANDSAT_OLI_B3, LANDSAT_OLI_B4, LANDSAT_OLI_B5]))
-                conv_y = convolved
+                convolved = self._band_values_for_display(x_data, y_data)
 
                 conv_curve = self.plot_widget.plot(
-                    conv_x, conv_y,
+                    LANDSAT_BAND_CENTERS_NM, convolved,
                     pen=pg.mkPen(color=color, width=LINE_THICKNESS),
                     symbol='s',
                     symbolBrush=color,
@@ -635,6 +688,7 @@ class LiveGraphApp(QMainWindow):
 
             self.reference_x = x
             self.reference_y = np.mean(frames, axis=0)
+            self.reference_convolved = None  # Force re-convolution against the new reference
             self.show_relative_label()
         finally:
             self.capture_overlay.hide()
@@ -896,6 +950,8 @@ class LiveGraphApp(QMainWindow):
                 self.pdf_prev_page()
         elif event.key() == Qt.Key_H or event.key() == Qt.Key_Space:
             self.hold_current_data()
+        elif event.key() == Qt.Key_T:
+            self.start_timed_hold()
         elif event.key() == Qt.Key_L:
             self.toggle_live_line()
         elif event.key() == Qt.Key_C:
@@ -910,6 +966,8 @@ class LiveGraphApp(QMainWindow):
             self.toggle_smoothing()
         elif event.key() == Qt.Key_6:
             self.toggle_peak_mode()
+        elif event.key() == Qt.Key_F:
+            self.toggle_fixed_y_axis()
         elif event.key() == Qt.Key_R:
             print("Pressed")
             self.set_reference_spectrum()
