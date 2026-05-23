@@ -193,6 +193,23 @@ class LiveGraphApp(QMainWindow):
         self.timed_hold_timer = None
         self.timed_hold_count = 0
         self.y_axis_fixed = False
+        self.peak_history_mode = False
+        self.peak_history_dt = 0.2  # seconds per sample
+        self.peak_history_total = 10.0  # seconds shown before restart
+        self.peak_history_size = int(round(self.peak_history_total / self.peak_history_dt))
+        self.peak_history_values = np.full(self.peak_history_size, np.nan)
+        self.peak_history_times = np.arange(self.peak_history_size) * self.peak_history_dt
+        self.peak_history_index = 0
+        self.peak_history_timer = None
+        self.peak_history_plot = None
+        self.peak_history_curve = None
+        self.averaging_mode = False
+        self.averaging_duration = 3.0  # seconds
+        self.averaging_buffer = []
+        self.averaging_label = None  # set in create_status_bar()
+        self.srf_display_mode = False
+        self.srf_curves = []
+        self.srf_data = []  # parallel list of (wavelengths_nm, values) for rescaling
         self.init_ui()
         self.setup_timer()
 
@@ -285,6 +302,28 @@ class LiveGraphApp(QMainWindow):
         self.capture_overlay.setAlignment(Qt.AlignCenter)
         self.capture_overlay.hide()
 
+        # Peak-over-time mini plot, anchored to the top-left of the main plot
+        self.peak_history_plot = pg.PlotWidget(parent=self.plot_widget)
+        self.peak_history_plot.setBackground('white')
+        self.peak_history_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.peak_history_plot.setXRange(0, self.peak_history_total, padding=0)
+        self.peak_history_plot.getViewBox().setMouseEnabled(x=False, y=False)
+        self.peak_history_plot.setLabel('bottom', 'Time (s)', color='black')
+        self.peak_history_plot.setLabel('left', 'Peak', color='black')
+        for axis_name in ('bottom', 'left'):
+            axis = self.peak_history_plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen('black'))
+            axis.setTextPen(pg.mkPen('black'))
+        self.peak_history_plot.setGeometry(30, 30, 900, 260)
+        self.peak_history_plot.setStyleSheet("border: 1px solid black;")
+        self.peak_history_curve = self.peak_history_plot.plot(
+            pen=pg.mkPen(color='black', width=2),
+            symbol='o',
+            symbolSize=6,
+            symbolBrush='black',
+        )
+        self.peak_history_plot.hide()
+
     def create_status_bar(self):
         """Create a status bar at the bottom with integration time and relative mode indicators."""
         status_widget = QWidget()
@@ -309,6 +348,12 @@ class LiveGraphApp(QMainWindow):
         status_layout.addStretch()
 
         # Mode labels on the right
+        self.averaging_label = QLabel("AVERAGING")
+        self.averaging_label.setFont(font)
+        self.averaging_label.setStyleSheet("color: darkgreen;")
+        self.averaging_label.setVisible(False)
+        status_layout.addWidget(self.averaging_label)
+
         self.smoothing_label = QLabel("SMOOTHING")
         self.smoothing_label.setFont(font)
         self.smoothing_label.setStyleSheet("color: blue;")
@@ -337,6 +382,10 @@ class LiveGraphApp(QMainWindow):
     def update_plot(self):
         x, y = get_live_data()
         self.current_x = x
+
+        if self.averaging_mode:
+            y = self._update_averaging_buffer(y)
+
         self.current_y = y
 
         y_disp = self.maybe_smooth(y)
@@ -362,9 +411,12 @@ class LiveGraphApp(QMainWindow):
                 # Enable auto-range for absolute mode
                 self.plot_widget.enableAutoRange(axis='y')
 
-        # Update convolution if mode is active
-        if self.convolution_mode:
+        # Update convolution if mode is active and the live line is shown
+        if self.convolution_mode and self.live_line_visible:
             self.update_convolution()
+
+        if self.srf_display_mode:
+            self._rescale_srf_curves()
 
     def maybe_smooth(self, y):
         """Apply Savitzky-Golay smoothing to y if smoothing is enabled."""
@@ -393,6 +445,65 @@ class LiveGraphApp(QMainWindow):
             self.plot_widget.setYRange(y_min, y_max, padding=0)
             self.y_axis_fixed = True
 
+    def fix_y_axis_small(self):
+        """Fix the y-axis to 0-0.05 (useful for low-signal absolute spectra)."""
+        self.plot_widget.setYRange(0, 0.05, padding=0)
+        self.y_axis_fixed = True
+
+    def toggle_averaging(self):
+        self.averaging_mode = not self.averaging_mode
+        self.averaging_buffer = []
+        if self.averaging_label is not None:
+            self.averaging_label.setVisible(self.averaging_mode)
+
+    def _update_averaging_buffer(self, y):
+        """Append the latest raw spectrum and return the rolling mean over
+        averaging_duration seconds."""
+        timer_interval_s = self.timer.interval() / 1000.0 if self.timer.interval() > 0 else 0.5
+        max_frames = max(1, int(round(self.averaging_duration / timer_interval_s)))
+        y_arr = np.asarray(y, dtype=float)
+        self.averaging_buffer.append(y_arr)
+        if len(self.averaging_buffer) > max_frames:
+            self.averaging_buffer = self.averaging_buffer[-max_frames:]
+        # If a previous frame has a different length (e.g. integration-time
+        # change), drop the older ones rather than crash on stack().
+        ref_len = len(y_arr)
+        self.averaging_buffer = [b for b in self.averaging_buffer if len(b) == ref_len]
+        return np.mean(np.stack(self.averaging_buffer), axis=0)
+
+    def toggle_peak_history(self):
+        self.peak_history_mode = not self.peak_history_mode
+        if self.peak_history_mode:
+            self.peak_history_values[:] = np.nan
+            self.peak_history_index = 0
+            self.peak_history_curve.setData([], [])
+            self.peak_history_plot.show()
+            self.peak_history_plot.raise_()
+            if self.peak_history_timer is None:
+                self.peak_history_timer = QTimer(self)
+                self.peak_history_timer.timeout.connect(self.update_peak_history)
+            self.peak_history_timer.start(int(self.peak_history_dt * 1000))
+        else:
+            if self.peak_history_timer is not None:
+                self.peak_history_timer.stop()
+            self.peak_history_plot.hide()
+
+    def update_peak_history(self):
+        if self.current_y is None:
+            return
+        if self.peak_history_index >= self.peak_history_size:
+            self.peak_history_values[:] = np.nan
+            self.peak_history_index = 0
+
+        self.peak_history_values[self.peak_history_index] = float(np.max(self.current_y))
+        self.peak_history_index += 1
+
+        mask = np.isfinite(self.peak_history_values)
+        self.peak_history_curve.setData(
+            self.peak_history_times[mask],
+            self.peak_history_values[mask],
+        )
+
     def compute_relative(self, y):
         """Divide y by the stored reference spectrum, masking low-SNR samples."""
         ref = self.reference_y
@@ -420,11 +531,17 @@ class LiveGraphApp(QMainWindow):
             else:
                 display_y = smoothed_current
 
+            label = str(self.held_line_counter)
+            if self.ndvi_display_mode:
+                ndvi = self._compute_ndvi(self.current_x, self.current_y)
+                if ndvi is not None:
+                    label = f'{self.held_line_counter} (NDVI: {ndvi:.4f})'
+
             held_curve = self.plot_widget.plot(
                 self.current_x,
                 display_y,
                 pen=pg.mkPen(color=color, width=LINE_THICKNESS),
-                name=str(self.held_line_counter),
+                name=label,
                 connect='finite'
             )
             self.held_curves.append(held_curve)
@@ -459,8 +576,12 @@ class LiveGraphApp(QMainWindow):
             ('| / \\', 'Toggle Savitzky-Golay smoothing'),
             ('6', 'Toggle peak normalisation (peak = 1.0)'),
             ('f', 'Fix / unfix y-axis range at current view'),
+            ('0', 'Fix y-axis range to 0 - 0.05'),
             ('s', 'Save spectrum to CSV file'),
             ('o', 'Open/load a saved spectrum'),
+            ('u', 'Toggle peak-over-time mini-plot (top-left)'),
+            ('a', 'Toggle 3 s rolling-average of the spectrum'),
+            ('k', 'Toggle Landsat 8 OLI spectral-response curves'),
             ('Ctrl+S', 'Save graph as image'),
             ('\u2190 / \u2192', 'Decrease / increase integration time'),
             ('p', 'Toggle PDF presentation mode'),
@@ -609,14 +730,37 @@ class LiveGraphApp(QMainWindow):
                 self.ndvi_label.setText('NDVI: ----')
 
     def toggle_ndvi_display(self):
+        if self.ndvi_display_mode:
+            self.ndvi_display_mode = False
+            self.ndvi_label.hide()
+            return
+        # Turning on: make sure Landsat convolution is active first
+        if not self.convolution_mode:
+            if not PYSPECTRA_AVAILABLE or not self.live_line_visible:
+                return
+            self.toggle_convolution_mode()
         if not self.convolution_mode:
             return
-        self.ndvi_display_mode = not self.ndvi_display_mode
-        if self.ndvi_display_mode:
-            self.ndvi_label.show()
-            self.update_convolution()
-        else:
-            self.ndvi_label.hide()
+        self.ndvi_display_mode = True
+        self.ndvi_label.show()
+        self.update_convolution()
+
+    def _compute_ndvi(self, x, y):
+        """NDVI from Landsat B4 (red) and B5 (NIR) for an (x, y) spectrum.
+        Returns None if PySpectra is unavailable or the value isn't finite."""
+        if not PYSPECTRA_AVAILABLE:
+            return None
+        try:
+            convolved = self._band_values_for_display(x, y)
+        except Exception:
+            return None
+        if len(convolved) < 5:
+            return None
+        red, nir = convolved[3], convolved[4]
+        denom = nir + red
+        if not np.isfinite(denom) or denom == 0:
+            return None
+        return (nir - red) / denom
 
     def convolve_held_lines(self):
         if not PYSPECTRA_AVAILABLE or not self.held_lines_data:
@@ -645,6 +789,60 @@ class LiveGraphApp(QMainWindow):
             except Exception as e:
                 print(f"Convolution error for held line {i+1}: {e}")
 
+    def toggle_srf_display(self):
+        """Show / hide the Landsat 8 OLI band spectral-response curves.
+        Only bands whose wavelength range fits inside the plot's x-range are drawn.
+        Curves are scaled to the current y-axis maximum so they stay visible."""
+        if not PYSPECTRA_AVAILABLE:
+            print("PySpectra not available - cannot display SRFs")
+            return
+
+        if self.srf_display_mode:
+            plot_item = self.plot_widget.plotItem
+            for curve in self.srf_curves:
+                if plot_item.legend is not None:
+                    plot_item.legend.removeItem(curve)
+                self.plot_widget.removeItem(curve)
+            self.srf_curves.clear()
+            self.srf_data.clear()
+            self.srf_display_mode = False
+            return
+
+        srf_colors = ['cyan', 'blue', 'green', 'red', 'magenta']
+        plot_item = self.plot_widget.plotItem
+        for i, srf in enumerate(LANDSAT_BANDS):
+            wavelengths_nm = np.asarray(srf.wavelengths) * 1000.0
+            if wavelengths_nm.min() < X_AXIS_MIN or wavelengths_nm.max() > X_AXIS_MAX:
+                continue
+            color = srf_colors[i % len(srf_colors)]
+            values = np.asarray(srf.values)
+            self.srf_data.append((wavelengths_nm, values))
+            curve = pg.PlotDataItem(
+                wavelengths_nm, values,
+                pen=pg.mkPen(color=color, width=4, style=Qt.DotLine),
+                name=f'L8 B{i+1} SRF',
+            )
+            # ignoreBounds keeps SRFs out of the auto-range calculation so
+            # rescaling them can't feed back into the y-axis max.
+            plot_item.addItem(curve, ignoreBounds=True)
+            if plot_item.legend is not None:
+                plot_item.legend.addItem(curve, curve.name())
+            self.srf_curves.append(curve)
+        self.srf_display_mode = True
+        self._rescale_srf_curves()
+
+    def _rescale_srf_curves(self):
+        """Scale SRF curves to 95% of the current y-axis max so they remain
+        prominent without forcing auto-range to expand."""
+        if not self.srf_display_mode or not self.srf_curves:
+            return
+        y_max = self.plot_widget.getViewBox().viewRange()[1][1]
+        if not np.isfinite(y_max) or y_max <= 0:
+            return
+        scale = 0.95 * y_max
+        for curve, (wavelengths_nm, values) in zip(self.srf_curves, self.srf_data):
+            curve.setData(wavelengths_nm, values * scale)
+
     def toggle_held_convolution_mode(self):
         if not self.held_lines_data:
             return
@@ -668,8 +866,18 @@ class LiveGraphApp(QMainWindow):
         self.live_line_visible = not self.live_line_visible
         if self.live_line_visible:
             self.plot_curve.show()
+            # Recreate the convolution curve so it tracks the live line again
+            if self.convolution_mode:
+                self.update_convolution()
+                if self.ndvi_display_mode:
+                    self.ndvi_label.show()
         else:
             self.plot_curve.hide()
+            if self.convolution_curve is not None:
+                self.plot_widget.removeItem(self.convolution_curve)
+                self.convolution_curve = None
+            if self.ndvi_display_mode:
+                self.ndvi_label.hide()
 
     def set_reference_spectrum(self):
         """Capture an averaged reference spectrum for relative measurements."""
@@ -719,9 +927,8 @@ class LiveGraphApp(QMainWindow):
     def update_integration_time_label(self):
         """Update the integration time label text in status bar."""
         if self.integration_time_label is not None:
-            # Convert microseconds to hundredths of a second
-            time_in_hundredths = self.integration_time / 10000.0
-            self.integration_time_label.setText(f'{time_in_hundredths:.2f}s')
+            time_ms = self.integration_time / 1000.0
+            self.integration_time_label.setText(f'{time_ms:.1f} ms')
 
     def _relative_mode_active(self):
         return self.reference_x is not None and self.reference_y is not None
@@ -968,6 +1175,8 @@ class LiveGraphApp(QMainWindow):
             self.toggle_peak_mode()
         elif event.key() == Qt.Key_F:
             self.toggle_fixed_y_axis()
+        elif event.key() == Qt.Key_0:
+            self.fix_y_axis_small()
         elif event.key() == Qt.Key_R:
             print("Pressed")
             self.set_reference_spectrum()
@@ -981,6 +1190,12 @@ class LiveGraphApp(QMainWindow):
             self.save_spectrum()
         elif event.key() == Qt.Key_O:
             self.load_spectrum_dialog()
+        elif event.key() == Qt.Key_U:
+            self.toggle_peak_history()
+        elif event.key() == Qt.Key_A:
+            self.toggle_averaging()
+        elif event.key() == Qt.Key_K:
+            self.toggle_srf_display()
         elif event.key() == Qt.Key_Question:
             self.show_help()
 

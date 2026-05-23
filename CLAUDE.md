@@ -15,8 +15,12 @@
 - `|` / `\` - Toggle Savitzky-Golay smoothing of the displayed spectrum
 - `6` - Toggle peak normalisation mode (scale so peak = 1.0)
 - `f` - Fix the y-axis range at its current values; press again to unfix (auto-range)
+- `0` - Fix the y-axis range to 0 - 0.05
 - `s` - Save current spectrum to CSV file (prompts for name)
 - `o` - Open/load a saved spectrum from file
+- `u` - Toggle peak-over-time mini-plot in top-left corner (10 s window, 0.2 s resolution)
+- `a` - Toggle rolling time-average of the displayed spectrum (3 s window)
+- `k` - Toggle display of Landsat 8 OLI spectral-response curves (only bands fitting within the x-range)
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
 - `p` - Toggle PDF presentation mode (file picker on first use; Space/Right = next, Left = prev)
 - `?` - Show help dialog with all keyboard shortcuts
