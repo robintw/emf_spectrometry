@@ -10,6 +10,7 @@
 - `t` - Hold current data 4 times at 0.5s intervals (2-second timed capture)
 - `l` - Toggle live line visibility on/off
 - `c` - Clear all held lines and reset numbering
+- `Shift+C` - Clear held lines and reset all toggleable modes, but keep the reference spectrum (stay in relative mode)
 - `` ` `` / `~` - Toggle Landsat 8 OLI convolution (live or held lines)
 - `n` - Toggle NDVI value display (only when Landsat convolution is on)
 - `|` / `\` - Toggle Savitzky-Golay smoothing of the displayed spectrum

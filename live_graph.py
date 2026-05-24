@@ -377,7 +377,13 @@ class LiveGraphApp(QMainWindow):
     def setup_timer(self):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
-        self.timer.start(500)
+        self.timer.start(self._main_timer_interval_ms())
+
+    def _main_timer_interval_ms(self):
+        """Main acquisition interval — faster while the peak-history mini-plot is on."""
+        if self.peak_history_mode:
+            return int(self.peak_history_dt * 1000)
+        return 500
 
     def update_plot(self):
         x, y = get_live_data()
@@ -487,6 +493,8 @@ class LiveGraphApp(QMainWindow):
             if self.peak_history_timer is not None:
                 self.peak_history_timer.stop()
             self.peak_history_plot.hide()
+        # Re-derive the main-timer interval from the new mode state
+        self.timer.setInterval(self._main_timer_interval_ms())
 
     def update_peak_history(self):
         if self.current_y is None:
@@ -569,6 +577,7 @@ class LiveGraphApp(QMainWindow):
             ('t', 'Hold 4 times over 2 seconds (every 0.5s)'),
             ('l', 'Toggle live line visibility'),
             ('c', 'Clear all held lines and reset numbering'),
+            ('Shift+C', 'Clear lines & all modes, but keep the reference spectrum'),
             ('b', 'Toggle background shaded regions'),
             ('r', 'Set reference spectrum (relative mode)'),
             ('` / ~', 'Toggle Landsat 8 OLI convolution'),
@@ -617,6 +626,71 @@ class LiveGraphApp(QMainWindow):
                 self.background_regions.append(region)
 
             self.background_regions_visible = True
+
+    def clear_all_except_reference(self):
+        """Clear all held lines, overlays, and toggle modes, but preserve the
+        reference spectrum so the live view stays in relative mode."""
+        # Held lines and their convolutions
+        for curve in self.held_curves:
+            self.plot_widget.removeItem(curve)
+        for curve in self.held_convolution_curves:
+            self.plot_widget.removeItem(curve)
+        self.held_curves.clear()
+        self.held_convolution_curves.clear()
+        self.held_lines_data.clear()
+        self.held_line_counter = 0
+        self.held_convolution_mode = False
+
+        # Live-line convolution overlay + NDVI readout
+        if self.convolution_curve is not None:
+            self.plot_widget.removeItem(self.convolution_curve)
+            self.convolution_curve = None
+        self.convolution_mode = False
+        self.ndvi_display_mode = False
+        if self.ndvi_label is not None:
+            self.ndvi_label.hide()
+
+        # SRF overlay (toggle off cleans up curves + legend entries)
+        if self.srf_display_mode:
+            self.toggle_srf_display()
+
+        # Background colour bands
+        if self.background_regions_visible:
+            for region in self.background_regions:
+                self.plot_widget.removeItem(region)
+            self.background_regions.clear()
+            self.background_regions_visible = False
+
+        # Processing modes
+        if self.smoothing_enabled:
+            self.smoothing_enabled = False
+            if self.smoothing_label is not None:
+                self.smoothing_label.setVisible(False)
+        if self.peak_mode:
+            self.peak_mode = False
+            if self.peak_label is not None:
+                self.peak_label.setVisible(False)
+        if self.averaging_mode:
+            self.averaging_mode = False
+            self.averaging_buffer = []
+            if self.averaging_label is not None:
+                self.averaging_label.setVisible(False)
+
+        # Peak-history mini-plot (also restores the main timer interval)
+        if self.peak_history_mode:
+            self.peak_history_mode = False
+            if self.peak_history_timer is not None:
+                self.peak_history_timer.stop()
+            self.peak_history_plot.hide()
+            self.timer.setInterval(self._main_timer_interval_ms())
+
+        # Live line back on, y-axis released
+        if not self.live_line_visible:
+            self.live_line_visible = True
+            self.plot_curve.show()
+        if self.y_axis_fixed:
+            self.y_axis_fixed = False
+            self.plot_widget.enableAutoRange(axis='y')
 
     def clear_held_lines(self):
         for curve in self.held_curves:
@@ -900,7 +974,7 @@ class LiveGraphApp(QMainWindow):
             self.show_relative_label()
         finally:
             self.capture_overlay.hide()
-            self.timer.start(500)
+            self.timer.start(self._main_timer_interval_ms())
 
     def _show_capture_overlay(self):
         """Center the capture-in-progress overlay over the plot and show it."""
@@ -1161,6 +1235,8 @@ class LiveGraphApp(QMainWindow):
             self.start_timed_hold()
         elif event.key() == Qt.Key_L:
             self.toggle_live_line()
+        elif event.key() == Qt.Key_C and event.modifiers() & Qt.ShiftModifier:
+            self.clear_all_except_reference()
         elif event.key() == Qt.Key_C:
             self.clear_held_lines()
         elif event.key() == Qt.Key_B:
