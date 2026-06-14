@@ -11,17 +11,21 @@
 - `l` - Toggle live line visibility on/off
 - `c` - Clear all held lines and reset numbering
 - `Shift+C` - Clear held lines and reset all toggleable modes, but keep the reference spectrum (stay in relative mode)
+- `b` - Toggle background shaded wavelength regions
+- `r` - Set the current spectrum as the reference (relative mode)
 - `` ` `` / `~` - Toggle Landsat 8 OLI convolution (live or held lines)
 - `n` - Toggle NDVI value display (only when Landsat convolution is on)
 - `|` / `\` - Toggle Savitzky-Golay smoothing of the displayed spectrum
 - `6` - Toggle peak normalisation mode (scale so peak = 1.0)
 - `f` - Fix the y-axis range at its current values; press again to unfix (auto-range)
 - `0` - Fix the y-axis range to 0 - 0.05
-- `s` - Save current spectrum to CSV file (prompts for name)
+- `↑` / `↓` - In relative mode, raise / lower the y-axis max by 0.1 (min 0.1; resets to 1.2 when a new reference is taken)
+- `s` - Save a held spectrum to CSV file (must hold one first; asks which if several are held, then prompts for name)
 - `o` - Open/load a saved spectrum from file
 - `u` - Toggle peak-over-time mini-plot in top-left corner (10 s window, 0.2 s resolution)
 - `a` - Toggle rolling time-average of the displayed spectrum (3 s window)
 - `k` - Toggle display of Landsat 8 OLI spectral-response curves (only bands fitting within the x-range)
+- `←` / `→` - Decrease / increase the spectrometer integration time
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
 - `p` - Toggle PDF presentation mode (file picker on first use; Space/Right = next, Left = prev)
 - `?` - Show help dialog with all keyboard shortcuts

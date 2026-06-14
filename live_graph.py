@@ -9,7 +9,7 @@ import random
 from scipy.signal import savgol_filter
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QMessageBox,
     QHBoxLayout, QLabel, QInputDialog, QStackedWidget, QFileDialog, QDialog,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy)
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont, QPixmap, QImage
 try:
@@ -210,6 +210,7 @@ class LiveGraphApp(QMainWindow):
         self.srf_display_mode = False
         self.srf_curves = []
         self.srf_data = []  # parallel list of (wavelengths_nm, values) for rescaling
+        self.relative_y_max = Y_RANGE_RELATIVE_MAX  # adjustable via Up/Down
         self.init_ui()
         self.setup_timer()
 
@@ -241,6 +242,9 @@ class LiveGraphApp(QMainWindow):
         self.pdf_label = QLabel()
         self.pdf_label.setAlignment(Qt.AlignCenter)
         self.pdf_label.setStyleSheet("background-color: black;")
+        # Ignore the label's pixmap size hint so a large PDF render can't
+        # inflate the QStackedWidget layout and clip the graph page's x-axis
+        self.pdf_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.stacked.addWidget(self.pdf_label)  # index 1
 
         self.plot_widget.setBackground('white')
@@ -402,7 +406,7 @@ class LiveGraphApp(QMainWindow):
             self.plot_curve.setData(x, relative_y, connect='finite')
             if not self.y_axis_fixed:
                 # Set fixed y-axis range for relative mode
-                self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, Y_RANGE_RELATIVE_MAX, padding=0)
+                self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, self.relative_y_max, padding=0)
         elif self.peak_mode:
             peak = np.max(y_disp)
             if peak > 0:
@@ -455,6 +459,18 @@ class LiveGraphApp(QMainWindow):
         """Fix the y-axis to 0-0.05 (useful for low-signal absolute spectra)."""
         self.plot_widget.setYRange(0, 0.05, padding=0)
         self.y_axis_fixed = True
+
+    def adjust_relative_y_max(self, delta):
+        """Bump the relative-mode y-axis maximum by `delta` (no-op outside
+        relative mode). Clamped to a minimum of 0.1."""
+        if not self._relative_mode_active():
+            return
+        new_max = round(self.relative_y_max + delta, 2)
+        if new_max < 0.1:
+            return
+        self.relative_y_max = new_max
+        if not self.y_axis_fixed:
+            self.plot_widget.setYRange(Y_RANGE_RELATIVE_MIN, self.relative_y_max, padding=0)
 
     def toggle_averaging(self):
         self.averaging_mode = not self.averaging_mode
@@ -586,13 +602,14 @@ class LiveGraphApp(QMainWindow):
             ('6', 'Toggle peak normalisation (peak = 1.0)'),
             ('f', 'Fix / unfix y-axis range at current view'),
             ('0', 'Fix y-axis range to 0 - 0.05'),
-            ('s', 'Save spectrum to CSV file'),
+            ('s', 'Save a held spectrum to CSV (asks which if several held)'),
             ('o', 'Open/load a saved spectrum'),
             ('u', 'Toggle peak-over-time mini-plot (top-left)'),
             ('a', 'Toggle 3 s rolling-average of the spectrum'),
             ('k', 'Toggle Landsat 8 OLI spectral-response curves'),
             ('Ctrl+S', 'Save graph as image'),
             ('\u2190 / \u2192', 'Decrease / increase integration time'),
+            ('\u2191 / \u2193', 'Increase / decrease relative-mode y-axis max (\u00b10.1)'),
             ('p', 'Toggle PDF presentation mode'),
             ('?', 'Show this help dialog'),
             ('Esc', 'Exit application'),
@@ -971,6 +988,7 @@ class LiveGraphApp(QMainWindow):
             self.reference_x = x
             self.reference_y = np.mean(frames, axis=0)
             self.reference_convolved = None  # Force re-convolution against the new reference
+            self.relative_y_max = Y_RANGE_RELATIVE_MAX
             self.show_relative_label()
         finally:
             self.capture_overlay.hide()
@@ -1028,9 +1046,30 @@ class LiveGraphApp(QMainWindow):
             self.update_integration_time_label()
 
     def save_spectrum(self):
-        """Save the currently displayed spectrum to a CSV file."""
-        if self.current_x is None or self.current_y is None:
+        """Save one of the held spectra to a CSV file. Requires a spectrum to
+        be held first (press h); if several are held, asks which one."""
+        if not self.held_lines_data:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Save Spectrum')
+            msg.setText('Hold a spectrum first (press h) before saving.')
+            msg.setFont(QFont('', 14))
+            msg.exec_()
             return
+
+        # Choose which held line to save
+        if len(self.held_lines_data) == 1:
+            index = 0
+        else:
+            max_items = min(len(self.held_lines_data), 9)
+            rows = [(str(i + 1), self.held_curves[i].name())
+                    for i in range(max_items)]
+            dialog = TableDialog('Save Spectrum', rows, self)
+            result = dialog.exec_()
+            if result <= 0 or result > max_items:
+                return
+            index = result - 1
+
+        x_data, y_data, _color = self.held_lines_data[index]
 
         name, ok = QInputDialog.getText(self, 'Save Spectrum', 'Spectrum name:')
         if not ok or not name.strip():
@@ -1040,7 +1079,7 @@ class LiveGraphApp(QMainWindow):
         os.makedirs(SAVED_SPECTRA_DIR, exist_ok=True)
         filepath = os.path.join(SAVED_SPECTRA_DIR, f'{name}.csv')
 
-        y_disp = self.maybe_smooth(self.current_y)
+        y_disp = self.maybe_smooth(y_data)
         mode = 'absolute'
         if self.reference_x is not None and self.reference_y is not None:
             y_disp = self.compute_relative(y_disp)
@@ -1059,7 +1098,7 @@ class LiveGraphApp(QMainWindow):
             f.write(f'# smoothing: {self.smoothing_enabled}\n')
             writer = csv.writer(f)
             writer.writerow(['wavelength', 'intensity'])
-            for wx, wy in zip(self.current_x, y_disp):
+            for wx, wy in zip(x_data, y_disp):
                 if np.isfinite(wy):
                     writer.writerow([f'{wx:.4f}', f'{wy:.6f}'])
 
@@ -1154,7 +1193,9 @@ class LiveGraphApp(QMainWindow):
         # Render at native resolution for HiDPI/Retina displays
         dpr = self.devicePixelRatioF()
         screen_rect = self.pdf_label.size()
-        zoom = (screen_rect.width() * dpr) / page.rect.width
+        # Fit the page within both width and height so nothing is clipped
+        zoom = min((screen_rect.width() * dpr) / page.rect.width,
+                   (screen_rect.height() * dpr) / page.rect.height)
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
@@ -1260,6 +1301,10 @@ class LiveGraphApp(QMainWindow):
             self.decrease_integration_time()
         elif event.key() == Qt.Key_Right:
             self.increase_integration_time()
+        elif event.key() == Qt.Key_Up:
+            self.adjust_relative_y_max(0.1)
+        elif event.key() == Qt.Key_Down:
+            self.adjust_relative_y_max(-0.1)
         elif event.key() == Qt.Key_S and event.modifiers() & Qt.ControlModifier:
             self.save_graph()
         elif event.key() == Qt.Key_S:
