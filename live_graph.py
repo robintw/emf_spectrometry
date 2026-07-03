@@ -3,6 +3,8 @@
 import sys
 import os
 import csv
+import atexit
+import subprocess
 from datetime import datetime
 import numpy as np
 import random
@@ -37,6 +39,10 @@ LINE_THICKNESS = 5
 AXIS_FONT_SIZE = 20
 X_AXIS_MIN = 300
 X_AXIS_MAX = 900
+
+# Always-on hard floor: any data below this wavelength (nm) is dropped so it
+# never appears on the graph. The axis range is unaffected (see X_AXIS_MIN).
+WAVELENGTH_DISPLAY_MIN = 350
 MAX_INTEGRATION_TIME = 150000
 MIN_INTEGRATION_TIME = 5000
 
@@ -97,15 +103,23 @@ def get_live_data_sine():
     y = np.sin((x - 600) / 100 + phase_offset)
     return x, y
 
+def filter_below_min(x, y):
+    """Drop any samples below WAVELENGTH_DISPLAY_MIN nm. Always on and
+    non-configurable, so nothing is ever displayed below that wavelength."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    mask = x >= WAVELENGTH_DISPLAY_MIN
+    return x[mask], y[mask]
+
 def get_live_data():
     if TEST_MODE:
-        return get_live_data_sine()
+        return filter_below_min(*get_live_data_sine())
     wavelengths = spec.wavelengths()
     intensities = spec.intensities(
         correct_dark_counts=CORRECT_DARK,
         correct_nonlinearity=CORRECT_NONLINEARITY,
     )
-    return wavelengths, intensities
+    return filter_below_min(wavelengths, intensities)
 
 class TableDialog(QDialog):
     """Dialog that displays a two-column table. Press a number key (1-9) to
@@ -210,6 +224,10 @@ class LiveGraphApp(QMainWindow):
         self.srf_display_mode = False
         self.srf_curves = []
         self.srf_data = []  # parallel list of (wavelengths_nm, values) for rescaling
+        self.click_value_mode = False
+        self.click_value_text = None  # TextItem on the graph, created in init_ui
+        self.click_value_x = None  # data x of the last click, for repositioning
+        self.click_mode_label = None  # status-bar indicator, set in create_status_bar()
         self.relative_y_max = Y_RANGE_RELATIVE_MAX  # adjustable via Up/Down
         self.init_ui()
         self.setup_timer()
@@ -290,6 +308,23 @@ class LiveGraphApp(QMainWindow):
         self.ndvi_label.setParentItem(self.plot_widget.getPlotItem().getViewBox())
         self.ndvi_label.setPos(15, 10)
         self.ndvi_label.hide()
+
+        # Click-to-inspect label. Added to the plot item (data coordinates)
+        # with ignoreBounds so it doesn't disturb the y auto-range. Anchored at
+        # top-centre: the x follows the click position, but the y is pinned to
+        # the top of the visible range (see _reposition_click_value) so it stays
+        # at the top of the screen as the graph rescales.
+        self.click_value_text = pg.TextItem('', color='black', anchor=(0.5, 0))
+        click_value_font = QFont()
+        click_value_font.setPointSize(32)
+        click_value_font.setBold(True)
+        self.click_value_text.setFont(click_value_font)
+        self.plot_widget.getPlotItem().addItem(self.click_value_text, ignoreBounds=True)
+        self.click_value_text.hide()
+        self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
+        # Keep the label pinned to the top of the view as the y-range changes
+        self.plot_widget.getPlotItem().getViewBox().sigRangeChanged.connect(
+            self._reposition_click_value)
 
         # Overlay shown while a reference spectrum is being captured
         self.capture_overlay = QLabel("CAPTURING REFERENCE...", self.plot_widget)
@@ -375,6 +410,12 @@ class LiveGraphApp(QMainWindow):
         self.relative_label.setStyleSheet("color: red;")
         self.relative_label.setVisible(False)
         status_layout.addWidget(self.relative_label)
+
+        self.click_mode_label = QLabel("CLICK VALUE")
+        self.click_mode_label.setFont(font)
+        self.click_mode_label.setStyleSheet("color: teal;")
+        self.click_mode_label.setVisible(False)
+        status_layout.addWidget(self.click_mode_label)
 
         return status_widget
 
@@ -607,6 +648,7 @@ class LiveGraphApp(QMainWindow):
             ('u', 'Toggle peak-over-time mini-plot (top-left)'),
             ('a', 'Toggle 3 s rolling-average of the spectrum'),
             ('k', 'Toggle Landsat 8 OLI spectral-response curves'),
+            ('v', 'Toggle click-to-inspect: click graph to show x value there'),
             ('Ctrl+S', 'Save graph as image'),
             ('\u2190 / \u2192', 'Decrease / increase integration time'),
             ('\u2191 / \u2193', 'Increase / decrease relative-mode y-axis max (\u00b10.1)'),
@@ -644,9 +686,10 @@ class LiveGraphApp(QMainWindow):
 
             self.background_regions_visible = True
 
-    def clear_all_except_reference(self):
-        """Clear all held lines, overlays, and toggle modes, but preserve the
-        reference spectrum so the live view stays in relative mode."""
+    def _clear_common(self):
+        """Cleanup shared by both clear actions (c and Shift+C): remove all
+        held lines and overlays, and reset every toggleable mode. Does NOT
+        touch the reference spectrum or the background colour bands."""
         # Held lines and their convolutions
         for curve in self.held_curves:
             self.plot_widget.removeItem(curve)
@@ -671,12 +714,12 @@ class LiveGraphApp(QMainWindow):
         if self.srf_display_mode:
             self.toggle_srf_display()
 
-        # Background colour bands
-        if self.background_regions_visible:
-            for region in self.background_regions:
-                self.plot_widget.removeItem(region)
-            self.background_regions.clear()
-            self.background_regions_visible = False
+        # Click-to-inspect mode + its label
+        if self.click_value_mode:
+            self.toggle_click_value_mode()
+        self.click_value_x = None
+        if self.click_value_text is not None:
+            self.click_value_text.hide()
 
         # Processing modes
         if self.smoothing_enabled:
@@ -709,29 +752,29 @@ class LiveGraphApp(QMainWindow):
             self.y_axis_fixed = False
             self.plot_widget.enableAutoRange(axis='y')
 
+    def clear_all_except_reference(self):
+        """Shift+C: clear all held lines, overlays, and toggle modes, but
+        preserve the reference spectrum so the live view stays in relative
+        mode. Background colour bands are left untouched."""
+        self._clear_common()
+
     def clear_held_lines(self):
-        for curve in self.held_curves:
-            self.plot_widget.removeItem(curve)
-        for curve in self.held_convolution_curves:
-            self.plot_widget.removeItem(curve)
-        self.held_curves.clear()
-        self.held_convolution_curves.clear()
-        self.held_lines_data.clear()
-        self.held_line_counter = 0
-        self.held_convolution_mode = False
-        # Clear reference spectrum
+        """c: clear all held lines, overlays, and toggle modes, AND drop the
+        reference spectrum so the view returns to absolute mode. Background
+        colour bands are left untouched."""
+        self._clear_common()
+        # Clear reference spectrum -> back to absolute mode
         self.reference_x = None
         self.reference_y = None
         self.reference_convolved = None
         self.hide_relative_label()
-        # Restore the live line if it was hidden
-        if not self.live_line_visible:
-            self.live_line_visible = True
-            self.plot_curve.show()
-        # Unfix the y-axis if it was fixed
-        if self.y_axis_fixed:
-            self.y_axis_fixed = False
-            self.plot_widget.enableAutoRange(axis='y')
+        # Restore the default y-axis label, reset the relative range, and
+        # re-enable auto-ranging (unconditionally, so it never sticks at the
+        # relative 0-1 range).
+        self.plot_widget.setLabel('left', 'Intensity', color='black')
+        self.relative_y_max = Y_RANGE_RELATIVE_MAX
+        self.y_axis_fixed = False
+        self.plot_widget.enableAutoRange(axis='y')
 
     def toggle_convolution_mode(self):
         if not PYSPECTRA_AVAILABLE:
@@ -953,6 +996,36 @@ class LiveGraphApp(QMainWindow):
                 self.plot_widget.removeItem(curve)
             self.held_convolution_curves.clear()
 
+    def toggle_click_value_mode(self):
+        self.click_value_mode = not self.click_value_mode
+        if self.click_mode_label is not None:
+            self.click_mode_label.setVisible(self.click_value_mode)
+        if not self.click_value_mode:
+            self.click_value_text.hide()
+
+    def on_plot_clicked(self, event):
+        """While click-value mode is on, show a large label with the x value
+        at the point clicked on the graph. The label's x tracks the click, but
+        its y is pinned to the top of the view."""
+        if not self.click_value_mode:
+            return
+        view_box = self.plot_widget.getPlotItem().getViewBox()
+        view_pos = view_box.mapSceneToView(event.scenePos())
+        self.click_value_x = view_pos.x()
+        self.click_value_text.setText(f'{self.click_value_x:.1f} nm')
+        self._reposition_click_value()
+        self.click_value_text.show()
+
+    def _reposition_click_value(self):
+        """Keep the click-value label at the stored x but pinned just below the
+        top of the current y-range, so it stays at the top as the graph moves."""
+        if self.click_value_x is None:
+            return
+        y_min, y_max = self.plot_widget.getViewBox().viewRange()[1]
+        # Sit a little below the top edge so the text isn't clipped
+        y_pos = y_max - 0.02 * (y_max - y_min)
+        self.click_value_text.setPos(self.click_value_x, y_pos)
+
     def toggle_live_line(self):
         self.live_line_visible = not self.live_line_visible
         if self.live_line_visible:
@@ -990,6 +1063,8 @@ class LiveGraphApp(QMainWindow):
             self.reference_convolved = None  # Force re-convolution against the new reference
             self.relative_y_max = Y_RANGE_RELATIVE_MAX
             self.show_relative_label()
+            # Relative spectra are reflectance (target / reference)
+            self.plot_widget.setLabel('left', 'Reflectance', color='black')
         finally:
             self.capture_overlay.hide()
             self.timer.start(self._main_timer_interval_ms())
@@ -1145,8 +1220,7 @@ class LiveGraphApp(QMainWindow):
                 wavelengths.append(float(row[0]))
                 intensities.append(float(row[1]))
 
-        x = np.array(wavelengths)
-        y = np.array(intensities)
+        x, y = filter_below_min(np.array(wavelengths), np.array(intensities))
 
         self.held_line_counter += 1
         color_index = (self.held_line_counter - 1) % len(self.held_colors)
@@ -1317,10 +1391,28 @@ class LiveGraphApp(QMainWindow):
             self.toggle_averaging()
         elif event.key() == Qt.Key_K:
             self.toggle_srf_display()
+        elif event.key() == Qt.Key_V:
+            self.toggle_click_value_mode()
         elif event.key() == Qt.Key_Question:
             self.show_help()
 
+def prevent_display_sleep():
+    """Stop the macOS display from sleeping while the app runs.
+
+    Launches `caffeinate -d` as a child process. The `-w <pid>` flag ties it
+    to this process, so it self-terminates if we ever crash rather than leaving
+    the display awake indefinitely. Registered atexit for a clean shutdown too.
+    Fails quietly if `caffeinate` isn't available (e.g. non-macOS)."""
+    try:
+        proc = subprocess.Popen(['caffeinate', '-d', '-w', str(os.getpid())])
+    except (OSError, FileNotFoundError):
+        print("Warning: could not launch caffeinate; display may sleep.")
+        return
+    atexit.register(proc.terminate)
+
+
 def main():
+    prevent_display_sleep()
     app = QApplication(sys.argv)
     window = LiveGraphApp()
     window.show()

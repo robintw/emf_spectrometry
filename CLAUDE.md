@@ -25,6 +25,7 @@
 - `u` - Toggle peak-over-time mini-plot in top-left corner (10 s window, 0.2 s resolution)
 - `a` - Toggle rolling time-average of the displayed spectrum (3 s window)
 - `k` - Toggle display of Landsat 8 OLI spectral-response curves (only bands fitting within the x-range)
+- `v` - Toggle click-to-inspect mode: click anywhere on the graph to show a large label with the x value (wavelength) at that point
 - `←` / `→` - Decrease / increase the spectrometer integration time
 - `Ctrl+S` / `Cmd+S` - Save current graph as image (SavedGraph_n.png)
 - `p` - Toggle PDF presentation mode (file picker on first use; Space/Right = next, Left = prev)
@@ -38,6 +39,7 @@
 - Color cycling: Blue → Green → Orange → Purple
 - Numbered legend for held lines
 - Toggleable live line visibility
+- Prevents the macOS display from sleeping while running (launches `caffeinate -d` via `prevent_display_sleep()` in `main()`; the `-w <pid>` flag makes it self-terminate if the app dies)
 
 ---
 
